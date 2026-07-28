@@ -16,9 +16,12 @@ defined('ALLOW_INTERNAL_SCAN') or define('ALLOW_INTERNAL_SCAN', true);
 defined('NVD_API_KEY')      or define('NVD_API_KEY',      getenv('NVD_API_KEY')      ?: '');
 defined('SHODAN_API_KEY')   or define('SHODAN_API_KEY',   getenv('SHODAN_API_KEY')   ?: '');
 defined('CENSYS_API_TOKEN') or define('CENSYS_API_TOKEN', getenv('CENSYS_API_TOKEN') ?: '');
+defined('OPENCVE_USER')     or define('OPENCVE_USER',     getenv('OPENCVE_USER')     ?: '');
+defined('OPENCVE_PASS')     or define('OPENCVE_PASS',     getenv('OPENCVE_PASS')     ?: '');
 
-define('CIRCL_API_BASE', 'https://cve.circl.lu/api/');
-define('NVD_API_BASE',   'https://services.nvd.nist.gov/rest/json/cves/2.0');
+define('CIRCL_API_BASE',  'https://cve.circl.lu/api/');
+define('NVD_API_BASE',    'https://services.nvd.nist.gov/rest/json/cves/2.0');
+define('OPENCVE_API_BASE','https://app.opencve.io/api/v2/');
 
 error_reporting(E_ALL);
 ini_set('display_errors', 0);
@@ -79,9 +82,10 @@ function safe_curl($url, $headers = [], $post_data = null, $timeout = 20) {
    ========================================================= */
 function get_api_status() {
     return [
-        'nvd'    => NVD_API_KEY    ? 'configured' : 'missing',
-        'shodan' => SHODAN_API_KEY ? 'configured' : 'missing',
-        'censys' => CENSYS_API_TOKEN ? 'configured' : 'missing',
+        'nvd'     => NVD_API_KEY      ? 'configured' : 'missing',
+        'shodan'  => SHODAN_API_KEY   ? 'configured' : 'missing',
+        'censys'  => CENSYS_API_TOKEN ? 'configured' : 'missing',
+        'opencve' => (OPENCVE_USER && OPENCVE_PASS) ? 'configured' : 'missing',
     ];
 }
 
@@ -277,6 +281,93 @@ function query_circl(string $keyword, int $limit = 20): array {
             'vector'    => $cve['cvss-vector'] ?? '',
             'cwe'       => $cve['cwe'] ?? '',
             'published' => substr($cve['Published'] ?? $cve['published'] ?? '', 0, 10),
+        ];
+    }
+    return $results;
+}
+
+/* =========================================================
+   INTELLIGENCE SOURCE: OpenCVE v2
+   Docs: https://app.opencve.io/api/v2/
+   Auth: HTTP Basic (OPENCVE_USER / OPENCVE_PASS)
+   ========================================================= */
+function query_opencve(string $keyword, int $limit = 30): array {
+    if (!OPENCVE_USER || !OPENCVE_PASS) return [];
+    $keyword = trim($keyword);
+    if (strlen($keyword) < 2) return [];
+
+    // OpenCVE CVE search endpoint
+    $url = OPENCVE_API_BASE . 'cves?search=' . urlencode($keyword) . '&limit=' . $limit;
+    $ch  = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 20,
+        CURLOPT_CONNECTTIMEOUT => 8,
+        CURLOPT_USERAGENT      => 'VulnScope-Pro/5.0 (Security Research)',
+        CURLOPT_USERPWD        => OPENCVE_USER . ':' . OPENCVE_PASS,
+        CURLOPT_HTTPAUTH       => CURLAUTH_BASIC,
+        CURLOPT_HTTPHEADER     => ['Accept: application/json'],
+        CURLOPT_SSL_VERIFYPEER => true,
+    ]);
+    $response = curl_exec($ch);
+    $code     = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($code >= 400 || !$response) return [];
+    $data = json_decode($response, true);
+
+    $results = [];
+    $seen    = [];
+    // OpenCVE v2 returns {count, results: [{cve_id, description, ...}]}
+    $items = $data['results'] ?? $data;
+    if (!is_array($items)) return [];
+
+    foreach (array_slice($items, 0, $limit) as $item) {
+        $id = $item['cve_id'] ?? $item['id'] ?? '';
+        if (!$id || isset($seen[$id])) continue;
+        $seen[$id] = true;
+
+        // OpenCVE v2 stores CVSS inside metrics
+        $score  = 0;
+        $vector = '';
+        $metrics = $item['metrics'] ?? [];
+        foreach (['cvssV31', 'cvssV30', 'cvssV2'] as $mk) {
+            if (!empty($metrics[$mk]['data']['score'])) {
+                $score  = (float)$metrics[$mk]['data']['score'];
+                $vector = $metrics[$mk]['data']['vector'] ?? '';
+                break;
+            }
+        }
+        // Fallback: some versions nest differently
+        if ($score === 0 && isset($item['cvss'])) {
+            $score = (float)$item['cvss'];
+        }
+
+        $desc = '';
+        if (!empty($item['description'])) {
+            // Can be a string or array of {lang, value}
+            if (is_string($item['description'])) {
+                $desc = $item['description'];
+            } elseif (is_array($item['description'])) {
+                foreach ($item['description'] as $d) {
+                    if (($d['lang'] ?? '') === 'en') { $desc = $d['value']; break; }
+                }
+                if (!$desc && isset($item['description'][0])) {
+                    $desc = $item['description'][0]['value'] ?? '';
+                }
+            }
+        }
+        if (!$desc) $desc = 'No description available.';
+
+        $results[] = [
+            'id'        => $id,
+            'cvss'      => $score,
+            'severity'  => classify_severity($score),
+            'summary'   => $desc,
+            'source'    => 'OpenCVE',
+            'vector'    => $vector,
+            'cwe'       => $item['cwe'] ?? '',
+            'published' => substr($item['created_at'] ?? $item['published'] ?? '', 0, 10),
         ];
     }
     return $results;
@@ -493,15 +584,80 @@ function php_socket_scan(string $host, string $ip): string {
 /* =========================================================
    PRIMARY SCAN ENGINE
    ========================================================= */
+/**
+ * Port number → [service_name, product, search_keywords[]] inference table.
+ * Used when nmap reports "tcpwrapped" or no product/version data.
+ */
+function port_to_products(int $port): array {
+    $map = [
+        21    => ['ftp',              'vsftpd',                     ['vsftpd', 'ProFTPD', 'FileZilla Server']],
+        22    => ['ssh',              'OpenSSH',                    ['OpenSSH', 'Dropbear SSH']],
+        23    => ['telnet',           'telnet',                     ['telnet', 'telnetd']],
+        25    => ['smtp',             'Postfix',                    ['Postfix', 'Sendmail', 'Exim']],
+        53    => ['dns',              'BIND',                       ['ISC BIND', 'dnsmasq', 'PowerDNS']],
+        80    => ['http',             'Apache httpd',               ['Apache', 'Nginx', 'IIS', 'Lighttpd']],
+        110   => ['pop3',             'Dovecot',                    ['Dovecot', 'Courier', 'qmail']],
+        111   => ['rpcbind',          'rpcbind',                    ['rpcbind', 'portmap']],
+        135   => ['msrpc',            'Microsoft RPC',              ['Microsoft RPC', 'DCOM']],
+        139   => ['netbios',          'Samba',                      ['Samba', 'Windows SMB']],
+        143   => ['imap',             'Dovecot',                    ['Dovecot IMAP', 'Cyrus IMAP']],
+        443   => ['https',            'OpenSSL',                    ['Apache', 'Nginx', 'OpenSSL', 'IIS']],
+        445   => ['smb',              'Samba',                      ['Samba', 'Microsoft SMB', 'EternalBlue']],
+        465   => ['smtps',            'Postfix',                    ['Postfix', 'Exim SMTP']],
+        514   => ['syslog',           'rsyslog',                    ['rsyslog', 'syslog']],
+        587   => ['smtp',             'Postfix',                    ['Postfix submission', 'Exim']],
+        631   => ['ipp',              'CUPS',                       ['CUPS', 'IPP printer']],
+        993   => ['imaps',            'Dovecot',                    ['Dovecot IMAP', 'OpenSSL']],
+        995   => ['pop3s',            'Dovecot',                    ['Dovecot POP3', 'OpenSSL']],
+        1433  => ['mssql',            'Microsoft SQL Server',       ['Microsoft SQL Server', 'MSSQL']],
+        1521  => ['oracle',           'Oracle Database',            ['Oracle TNS', 'Oracle Database']],
+        2049  => ['nfs',              'NFS',                        ['NFS', 'rpc.nfsd']],
+        2375  => ['docker',           'Docker API',                 ['Docker', 'containerd']],
+        2376  => ['docker-tls',       'Docker API TLS',             ['Docker TLS', 'Docker daemon']],
+        3000  => ['http',             'Node.js',                    ['Node.js', 'Express.js', 'Grafana']],
+        3306  => ['mysql',            'MySQL',                      ['MySQL', 'MariaDB', 'Percona']],
+        3389  => ['rdp',              'Microsoft RDP',              ['Microsoft RDP', 'Windows Remote Desktop']],
+        4848  => ['glassfish',        'GlassFish',                  ['GlassFish', 'Payara']],
+        5432  => ['postgresql',       'PostgreSQL',                 ['PostgreSQL', 'pg_hba']],
+        5601  => ['kibana',           'Kibana',                     ['Kibana', 'Elasticsearch']],
+        5900  => ['vnc',              'RealVNC',                    ['VNC', 'LibVNCServer', 'TigerVNC']],
+        5985  => ['winrm',            'WinRM',                      ['WinRM', 'Windows WinRM', 'PowerShell remoting']],
+        6379  => ['redis',            'Redis',                      ['Redis', 'redis-server']],
+        6443  => ['kubernetes',       'Kubernetes API',             ['Kubernetes', 'k8s apiserver']],
+        7001  => ['weblogic',         'Oracle WebLogic',            ['WebLogic', 'Oracle WebLogic']],
+        8008  => ['http',             'HTTP alternative',           ['Apache', 'Nginx']],
+        8080  => ['http',             'Apache Tomcat',              ['Apache Tomcat', 'Jetty', 'JBoss']],
+        8081  => ['http',             'HTTP service',               ['Nginx', 'Squid proxy']],
+        8443  => ['https',            'Apache Tomcat TLS',          ['Apache Tomcat', 'JBoss', 'WildFly']],
+        8888  => ['http',             'Jupyter Notebook',           ['Jupyter', 'Python HTTP']],
+        9000  => ['http',             'PHP-FPM',                    ['PHP-FPM', 'SonarQube', 'Portainer']],
+        9090  => ['http',             'Prometheus',                 ['Prometheus', 'Cockpit']],
+        9200  => ['elasticsearch',    'Elasticsearch',              ['Elasticsearch', 'OpenSearch']],
+        9300  => ['elasticsearch',    'Elasticsearch cluster',      ['Elasticsearch']],
+        10250 => ['kubelet',          'Kubernetes Kubelet',         ['Kubernetes kubelet']],
+        11211 => ['memcached',        'Memcached',                  ['Memcached']],
+        15672 => ['rabbitmq',         'RabbitMQ Management',        ['RabbitMQ', 'AMQP']],
+        27017 => ['mongodb',          'MongoDB',                    ['MongoDB', 'mongodbserver']],
+        27018 => ['mongodb',          'MongoDB shard',              ['MongoDB']],
+        50070 => ['hadoop',           'Hadoop HDFS',                ['Hadoop', 'HDFS']],
+    ];
+    return $map[$port] ?? ['unknown', 'unknown', []];
+}
+
 function run_nmap(string $target): string {
     // Try real nmap binary first (works after Dockerfile fix on Render)
     $bin = trim((string)shell_exec('which nmap 2>/dev/null || where nmap 2>NUL'));
-    $bin = explode("\n", $bin)[0];
+    $bin = trim(explode("\n", $bin)[0]);
 
-    if (!empty($bin) && @file_exists(trim($bin))) {
+    if (!empty($bin) && @file_exists($bin)) {
         $safe = escapeshellarg($target);
-        $out  = shell_exec("{$bin} -sV -sC --version-intensity 7 -T4 -oX - {$safe} 2>&1");
+        // Full recon: service version + default scripts including vuln detection
+        $out = shell_exec("{$bin} -sV --version-intensity 9 -sC --script vuln,default -T4 -oX - {$safe} 2>&1");
         if ($out && strpos($out, '<nmaprun') !== false) return $out;
+
+        // Fallback: lighter scan if vuln scripts time out
+        $out2 = shell_exec("{$bin} -sV --version-intensity 5 -T4 -oX - {$safe} 2>&1");
+        if ($out2 && strpos($out2, '<nmaprun') !== false) return $out2;
     }
 
     // PHP socket fallback
@@ -572,66 +728,159 @@ if (isset($_GET['action'])) {
             $xml        = @simplexml_load_string($nmap_xml);
             $findings   = [];   // keyed by CVE ID for dedup
             $open_ports = [];
+            $nse_findings = []; // NSE vuln-script direct CVE hits
+
+            /* ---- Helper: merge a CVE hit into $findings ---- */
+            $add_finding = function(array $hit, string $port_id, string $service_label) use (&$findings) {
+                $hit['affected_service'] = $hit['affected_service'] ?? $service_label;
+                $hit['port']             = $hit['port'] ?? $port_id;
+                $id = $hit['id'];
+                if (!isset($findings[$id])) {
+                    $findings[$id] = $hit;
+                } else {
+                    // Merge source labels
+                    $src = $hit['source'] ?? '';
+                    if ($src && !str_contains($findings[$id]['source'] ?? '', $src)) {
+                        $findings[$id]['source'] .= ' / ' . $src;
+                    }
+                    // Upgrade CVSS if new source has a better score
+                    if (($findings[$id]['cvss'] ?? 0) == 0 && ($hit['cvss'] ?? 0) > 0) {
+                        $findings[$id]['cvss']     = $hit['cvss'];
+                        $findings[$id]['severity'] = $hit['severity'];
+                    }
+                }
+            };
 
             /* ---- 2. Parse scan results & query CVEs per service ---- */
             if ($xml && isset($xml->host->ports->port)) {
                 foreach ($xml->host->ports->port as $p) {
-                    if ((string)$p->state['state'] !== 'open') continue;
+                    $state = (string)($p->state['state'] ?? '');
+                    // Accept 'open' AND 'open|filtered' — both mean reachable
+                    if ($state !== 'open' && $state !== 'open|filtered') continue;
 
-                    $svc     = $p->service;
-                    $svc_name= (string)($svc['name']    ?? '');
-                    $product = (string)($svc['product']  ?? '');
-                    $version = (string)($svc['version']  ?? '');
-                    $port_id = (string)($p['portid']     ?? '');
+                    $svc      = $p->service;
+                    $svc_name = (string)($svc['name']    ?? '');
+                    $product  = (string)($svc['product'] ?? '');
+                    $version  = (string)($svc['version'] ?? '');
+                    $port_id  = (string)($p['portid']    ?? '');
+                    $port_int = (int)$port_id;
+
+                    // --- TCPWrapped / unknown service fix ---
+                    // When nmap can't fingerprint the service it reports 'tcpwrapped'
+                    // or leaves product empty. Infer from well-known port numbers.
+                    $inferred_products = [];
+                    if (empty($product) || in_array(strtolower($svc_name), ['tcpwrapped', 'unknown', ''])) {
+                        [$inf_svc, $inf_prod, $inf_keywords] = port_to_products($port_int);
+                        if ($inf_prod !== 'unknown') {
+                            if (empty($product)) $product  = $inf_prod;
+                            if (empty($svc_name)) $svc_name = $inf_svc;
+                            $inferred_products = $inf_keywords;
+                        }
+                    }
 
                     $open_ports[] = [
                         'port'    => $port_id,
-                        'service' => $svc_name,
+                        'service' => $svc_name ?: 'unknown',
                         'product' => $product,
                         'version' => $version,
                     ];
 
-                    if (empty($product) && empty($svc_name)) continue;
-
-                    // Build search keywords for maximum CVE coverage
+                    // Build search keyword list from detected + inferred products
                     $keywords = [];
-                    if ($product) {
+                    if ($product && !in_array(strtolower($product), ['tcpwrapped', 'unknown'])) {
                         $norm = normalize_product($product);
                         if ($norm) {
                             $keywords[] = $norm;
                             if ($version) $keywords[] = $norm . ' ' . $version;
                         }
                     }
-                    if ($svc_name && !in_array($svc_name, ['http', 'https', 'tcpwrapped'])) {
+                    // Add inferred keywords (well-known product names for this port)
+                    foreach ($inferred_products as $kw) {
+                        $normalized = normalize_product($kw);
+                        if ($normalized) $keywords[] = $normalized;
+                    }
+                    if ($svc_name && !in_array(strtolower($svc_name), ['tcpwrapped','unknown','http','https','ssl'])) {
                         $keywords[] = $svc_name;
                     }
 
-                    foreach (array_unique($keywords) as $kw) {
-                        // NVD lookup
-                        foreach (query_nvd($kw, 30) as $hit) {
-                            $hit['affected_service'] = trim("$product $version");
-                            $hit['port']             = $port_id;
-                            if (!isset($findings[$hit['id']])) {
-                                $findings[$hit['id']] = $hit;
-                            } else {
-                                // Merge sources
-                                if (!str_contains($findings[$hit['id']]['source'], 'NVD'))
-                                    $findings[$hit['id']]['source'] .= ' / NVD';
+                    $keywords = array_unique(array_filter($keywords));
+                    $service_label = trim("$product $version") ?: "Port $port_id";
+
+                    foreach ($keywords as $kw) {
+                        if (strlen(trim($kw)) < 2) continue;
+
+                        // NVD v2
+                        foreach (query_nvd($kw, 25) as $hit) {
+                            $add_finding($hit, $port_id, $service_label);
+                        }
+                        // CIRCL (free, no key needed)
+                        foreach (query_circl($kw, 15) as $hit) {
+                            $add_finding($hit, $port_id, $service_label);
+                        }
+                        // OpenCVE v2
+                        foreach (query_opencve($kw, 20) as $hit) {
+                            $add_finding($hit, $port_id, $service_label);
+                        }
+                    }
+
+                    // --- NSE vuln script output → direct CVE findings ---
+                    // Nmap --script vuln outputs CVE IDs in script output XML
+                    foreach ($p->script as $script) {
+                        $script_id  = strtolower((string)($script['id'] ?? ''));
+                        $script_out = trim((string)($script['output'] ?? ''));
+
+                        // Extract CVE IDs from NSE output text
+                        if (preg_match_all('/CVE-\d{4}-\d+/i', $script_out, $cve_matches)) {
+                            foreach ($cve_matches[0] as $cve_id) {
+                                $cve_id = strtoupper($cve_id);
+                                if (isset($findings[$cve_id])) continue;
+                                // Enrich via CIRCL first (fast), NVD as backup
+                                $enriched = enrich_cve_from_circl($cve_id);
+                                if (!$enriched) {
+                                    $enriched = [
+                                        'id'        => $cve_id,
+                                        'cvss'      => 7.0,
+                                        'severity'  => 'High',
+                                        'summary'   => 'Detected by Nmap NSE vuln script: ' . $script_id,
+                                        'source'    => 'Nmap NSE',
+                                        'vector'    => '',
+                                        'cwe'       => '',
+                                        'published' => '',
+                                    ];
+                                } else {
+                                    $enriched['source'] = 'Nmap NSE / CIRCL';
+                                }
+                                $add_finding($enriched, $port_id, $service_label);
                             }
                         }
-                        // CIRCL lookup (no API key needed — free!)
-                        foreach (query_circl($kw, 15) as $hit) {
-                            $hit['affected_service'] = trim("$product $version");
-                            $hit['port']             = $port_id;
-                            if (!isset($findings[$hit['id']])) {
-                                $findings[$hit['id']] = $hit;
-                            } elseif (!str_contains($findings[$hit['id']]['source'], 'CIRCL')) {
-                                $findings[$hit['id']]['source'] .= ' / CIRCL';
-                                // Upgrade CVSS if CIRCL has a better score
-                                if ($findings[$hit['id']]['cvss'] == 0 && $hit['cvss'] > 0) {
-                                    $findings[$hit['id']]['cvss']     = $hit['cvss'];
-                                    $findings[$hit['id']]['severity'] = $hit['severity'];
-                                }
+
+                        // Also capture high-value NSE non-CVE findings (e.g. ms17-010, heartbleed)
+                        $known_critical = [
+                            'smb-vuln-ms17-010'  => ['MS17-010 (EternalBlue)', 9.8],
+                            'smb-vuln-ms08-067'  => ['MS08-067 Netapi RCE',   10.0],
+                            'ssl-heartbleed'     => ['CVE-2014-0160 Heartbleed', 7.5],
+                            'ssl-drown'          => ['CVE-2016-0800 DROWN',   5.9],
+                            'ssl-poodle'         => ['CVE-2014-3566 POODLE',  3.4],
+                            'smb-vuln-conficker'  => ['MS08-067 Conficker',   10.0],
+                            'http-shellshock'    => ['CVE-2014-6271 Shellshock', 9.8],
+                            'ftp-anon'           => ['Anonymous FTP Access',   5.0],
+                        ];
+                        if (isset($known_critical[$script_id]) && str_contains(strtolower($script_out), 'vulnerable')) {
+                            [$vuln_name, $cvss_score] = $known_critical[$script_id];
+                            $fake_id = 'NSE-' . strtoupper(str_replace(['-', '_'], '', $script_id));
+                            if (!isset($findings[$fake_id])) {
+                                $findings[$fake_id] = [
+                                    'id'              => $fake_id,
+                                    'cvss'            => $cvss_score,
+                                    'severity'        => classify_severity($cvss_score),
+                                    'summary'         => $vuln_name . ' — ' . substr($script_out, 0, 200),
+                                    'source'          => 'Nmap NSE',
+                                    'vector'          => '',
+                                    'cwe'             => '',
+                                    'published'       => '',
+                                    'affected_service'=> $service_label,
+                                    'port'            => $port_id,
+                                ];
                             }
                         }
                     }
@@ -1023,7 +1272,7 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
   <div class="sb-apis">
     <div class="sb-api-lbl">API Source Status</div>
     <?php
-$_alist  = ['nvd' => 'NVD v2', 'shodan' => 'Shodan', 'censys' => 'Censys v2'];
+$_alist  = ['nvd' => 'NVD v2', 'shodan' => 'Shodan', 'censys' => 'Censys v2', 'opencve' => 'OpenCVE'];
 $_astatus = get_api_status();
 foreach ($_alist as $_ak => $_al):
     $_aok = $_astatus[$_ak] === 'configured';
@@ -1055,7 +1304,7 @@ foreach ($_alist as $_ak => $_al):
       <div class="scan-ph">
         <div>
           <h1>Attack Surface Assessment</h1>
-          <p>NVD v2 &middot; Shodan &middot; Censys v2 &middot; CIRCL &middot; Nmap / PHP Socket Engine</p>
+          <p>NVD v2 &middot; Shodan &middot; Censys v2 &middot; CIRCL &middot; OpenCVE &middot; Nmap NSE / PHP Socket Engine</p>
         </div>
         <div class="eng-badge"><i class="fas fa-circle" style="font-size:7px;color:#22c55e;animation:dpulse 1.5s infinite"></i>Scan Core Active</div>
       </div>
@@ -1198,7 +1447,7 @@ function renderDashboard(resp){
   ctr(document.getElementById('portsCountVal'),s.open_ports_count);
   document.getElementById('portsCount').innerText=s.open_ports_count+' Open Services';
   document.getElementById('portsCount2').innerText=s.open_ports_count+' Assets';
-  if(as)document.getElementById('apiStatusDisplay').innerHTML=Object.entries(as).map(([k,v])=>{const ok=v==='configured';const lbl={'nvd':'NVD v2','shodan':'Shodan','censys':'Censys v2'};return `<div class="sb-api-row"><div class="sb-api-name"><span class="dot ${ok?'dot-on':'dot-off'}"></span>${lbl[k]||k.toUpperCase()}</div><span class="api-badge ${ok?'on':'off'}">${ok?'Active':'Offline'}</span></div>`}).join('');
+  if(as)document.getElementById('apiStatusDisplay').innerHTML=Object.entries(as).map(([k,v])=>{const ok=v==='configured';const lbl={'nvd':'NVD v2','shodan':'Shodan','censys':'Censys v2','opencve':'OpenCVE'};return `<div class="sb-api-row"><div class="sb-api-name"><span class="dot ${ok?'dot-on':'dot-off'}"></span>${lbl[k]||k.toUpperCase()}</div><span class="api-badge ${ok?'on':'off'}">${ok?'Active':'Offline'}</span></div>`}).join('');
   renderSevBars(sd,s.total_findings);renderPorts(di.ports||[]);_all=f;renderVulns(f);
   setTimeout(()=>re.scrollIntoView({behavior:'smooth',block:'start'}),160);
 }
