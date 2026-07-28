@@ -1443,46 +1443,211 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
 .fb.fh.active{background:var(--warn-dim);border-color:rgba(249,115,22,.3);color:var(--warn)}
 .fb.fm.active{background:var(--med-dim);border-color:rgba(234,179,8,.3);color:var(--med)}
 #vulnList{max-height:560px;overflow-y:auto;display:flex;flex-direction:column;gap:9px;padding:16px 18px}
-.vc{border-radius:var(--r12);padding:0;border:1px solid var(--border);background:rgba(255,255,255,.016);transition:border-color .18s ease,background .18s ease;animation:cin .25s ease both;position:relative;overflow:hidden;cursor:pointer}
-.vc::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;transition:opacity .2s}
-.vc.severity-Critical::before{background:var(--danger)}.vc.severity-Critical{border-color:var(--danger-border);background:var(--danger-dim)}
-.vc.severity-High::before{background:var(--warn)}.vc.severity-High{border-color:rgba(249,115,22,.2);background:var(--warn-dim)}
-.vc.severity-Medium::before{background:var(--med)}.vc.severity-Medium{border-color:rgba(234,179,8,.2);background:var(--med-dim)}
-.vc.severity-Low::before{background:var(--low)}.vc.severity-Low{border-color:rgba(34,211,238,.15);background:var(--low-dim)}
+.vc{
+  border-radius:var(--r12);padding:0;
+  border:1px solid var(--border);
+  background:rgba(255,255,255,.016);
+  transition:border-color .18s ease,background .18s ease;
+  animation:cin .25s ease both;
+  position:relative;overflow:hidden;cursor:pointer;
+}
+.vc::before{
+  content:"";position:absolute;left:0;top:0;bottom:0;width:3px;
+  transition:opacity .2s;
+}
+/* severity tints ------------------------------------------- */
+.vc.severity-Critical::before{background:var(--danger)}
+.vc.severity-Critical{border-color:var(--danger-border);background:var(--danger-dim)}
+.vc.severity-High::before{background:var(--warn)}
+.vc.severity-High{border-color:rgba(249,115,22,.2);background:var(--warn-dim)}
+.vc.severity-Medium::before{background:var(--med)}
+.vc.severity-Medium{border-color:rgba(234,179,8,.2);background:var(--med-dim)}
+.vc.severity-Low::before{background:var(--low)}
+.vc.severity-Low{border-color:rgba(34,211,238,.15);background:var(--low-dim)}
 .vc.severity-Info::before,.vc.severity-Unknown::before{background:var(--info)}
 .vc.severity-Info,.vc.severity-Unknown{border-color:var(--border);background:var(--info-dim)}
 .vc:hover{border-color:rgba(255,255,255,.12)}
 .vc.expanded{box-shadow:0 4px 24px rgba(0,0,0,.25)}
 @keyframes cin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-/* --- Compact header row (always visible) --- */
-.vc-hdr{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 16px;min-height:44px;user-select:none}
-.vc-ids{display:flex;align-items:center;gap:7px;flex:1;min-width:0;flex-wrap:nowrap}
-.vc-id{font-family:var(--mono);font-size:12.5px;font-weight:700;color:var(--accent);line-height:1;white-space:nowrap}
-.vc-id a{color:inherit;text-decoration:none;pointer-events:auto}
+
+/* --- COLLAPSED HEADER (always visible) -------------------- */
+/* Fixed height guarantees every row is exactly the same size */
+.vc-hdr{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  height:46px;          /* locked — same for ALL severity levels */
+  padding:0 14px 0 16px;
+  box-sizing:border-box;
+  user-select:none;
+}
+/* left group: CVE ID + source badge */
+.vc-ids{
+  display:flex;
+  align-items:center;   /* perfectly centres every child on the same axis */
+  gap:8px;
+  flex:1;
+  min-width:0;
+  overflow:hidden;
+}
+/* CVE ID text */
+.vc-id{
+  font-family:var(--mono);
+  font-size:12.5px;
+  font-weight:700;
+  color:var(--accent);
+  line-height:1;        /* collapse extra leading so baseline is predictable */
+  white-space:nowrap;
+  display:flex;
+  align-items:center;
+}
+.vc-id a{color:inherit;text-decoration:none;pointer-events:auto;display:inline-flex;align-items:center}
 .vc-id a:hover{text-decoration:underline}
-.src-badge{font-size:7.5px;font-weight:700;font-family:var(--mono);letter-spacing:.09em;text-transform:uppercase;padding:1px 5px;border-radius:3px;background:rgba(255,255,255,.04);color:var(--t3);border:1px solid var(--border2);flex-shrink:0}
-.vc-caret{font-size:9px;color:var(--t4);transition:transform .2s ease;flex-shrink:0;margin-left:4px}
-.vc.expanded .vc-caret{transform:rotate(180deg)}
-.sev-tags{display:flex;align-items:center;gap:5px;flex-shrink:0}
-.sp{font-size:9px;font-weight:700;font-family:var(--mono);letter-spacing:.07em;text-transform:uppercase;padding:2px 8px;border-radius:5px}
+/* NVD / Shodan / CIRCL source badge */
+.src-badge{
+  display:inline-flex;
+  align-items:center;
+  height:18px;          /* fixed height → same vertical footprint as chips */
+  padding:0 6px;
+  border-radius:3px;
+  font-size:7.5px;
+  font-weight:700;
+  font-family:var(--mono);
+  letter-spacing:.09em;
+  text-transform:uppercase;
+  background:rgba(255,255,255,.04);
+  color:var(--t3);
+  border:1px solid var(--border2);
+  flex-shrink:0;
+  box-sizing:border-box;
+  line-height:1;
+}
+/* right group: severity + CVSS + caret */
+.sev-tags{
+  display:flex;
+  align-items:center;   /* baseline-aligned group */
+  gap:6px;
+  flex-shrink:0;
+}
+/* severity badge (Critical / High / Medium / Low / Info) */
+.sp{
+  display:inline-flex;
+  align-items:center;
+  height:20px;          /* unified height — all severity badges identical */
+  padding:0 8px;
+  border-radius:5px;
+  font-size:9px;
+  font-weight:700;
+  font-family:var(--mono);
+  letter-spacing:.07em;
+  text-transform:uppercase;
+  line-height:1;
+  box-sizing:border-box;
+  white-space:nowrap;
+}
 .sp.Critical{background:rgba(239,68,68,.14);color:var(--danger);border:1px solid var(--danger-border)}
 .sp.High{background:rgba(249,115,22,.12);color:var(--warn);border:1px solid rgba(249,115,22,.25)}
 .sp.Medium{background:rgba(234,179,8,.12);color:var(--med);border:1px solid rgba(234,179,8,.25)}
 .sp.Low{background:rgba(34,211,238,.08);color:var(--low);border:1px solid rgba(34,211,238,.2)}
 .sp.Info,.sp.Unknown{background:rgba(100,116,139,.09);color:var(--info);border:1px solid var(--border)}
-.cvss-chip{font-size:9px;font-family:var(--mono);font-weight:700;color:#e2e8f0;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);padding:2px 8px;border-radius:4px}
-/* --- Expandable body --- */
-.vc-body{max-height:0;overflow:hidden;transition:max-height .28s cubic-bezier(.4,0,.2,1)}
+/* CVSS score chip */
+.cvss-chip{
+  display:inline-flex;
+  align-items:center;
+  height:20px;          /* same as .sp — locked to identical height */
+  padding:0 8px;
+  border-radius:4px;
+  font-size:9px;
+  font-weight:700;
+  font-family:var(--mono);
+  color:#e2e8f0;
+  background:rgba(255,255,255,.07);
+  border:1px solid rgba(255,255,255,.14);
+  line-height:1;
+  box-sizing:border-box;
+  white-space:nowrap;
+}
+/* expand/collapse chevron */
+.vc-caret{
+  font-size:9px;
+  color:var(--t4);
+  transition:transform .22s ease;
+  flex-shrink:0;
+  display:flex;
+  align-items:center;
+  width:16px;height:16px;justify-content:center;
+}
+.vc.expanded .vc-caret{transform:rotate(180deg)}
+
+/* --- EXPANDABLE BODY ------------------------------------- */
+.vc-body{
+  max-height:0;
+  overflow:hidden;
+  transition:max-height .28s cubic-bezier(.4,0,.2,1);
+}
 .vc.expanded .vc-body{max-height:600px}
-.vc-body-inner{padding:0 16px 14px;border-top:1px solid rgba(255,255,255,.05)}
-.vc-svc{font-size:10.5px;color:var(--accent);font-family:var(--mono);display:flex;align-items:center;gap:6px;font-weight:500;padding:10px 0 8px;border-bottom:1px solid rgba(255,255,255,.04);margin-bottom:10px}
+.vc-body-inner{
+  padding:0 16px 14px;
+  border-top:1px solid rgba(255,255,255,.05);
+}
+/* service line inside body */
+.vc-svc{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  font-size:10.5px;
+  font-weight:500;
+  font-family:var(--mono);
+  color:var(--accent);
+  padding:10px 0 8px;
+  border-bottom:1px solid rgba(255,255,255,.04);
+  margin-bottom:10px;
+  line-height:1;
+}
 .vc-svc i{font-size:10px;opacity:.7}
-.vc-sum{font-size:11.5px;color:var(--t2);line-height:1.65;margin-bottom:12px;word-break:break-word}
-.vc-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.vec-chip{font-size:8px;font-family:var(--mono);color:var(--t4);background:rgba(255,255,255,.02);border:1px solid var(--border);padding:1px 5px;border-radius:3px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block}
-.port-chip{font-size:9px;font-family:var(--mono);font-weight:700;color:var(--t3);background:rgba(255,255,255,.04);border:1px solid var(--border);padding:2px 7px;border-radius:4px}
-.cwe-chip{font-size:8px;font-family:var(--mono);color:var(--warn);background:rgba(249,115,22,.06);border:1px solid rgba(249,115,22,.18);padding:2px 6px;border-radius:4px}
-.date-chip{font-size:8px;font-family:var(--mono);color:var(--t4)}
+/* description paragraph */
+.vc-sum{
+  font-size:11.5px;
+  color:var(--t2);
+  line-height:1.65;
+  margin-bottom:12px;
+  word-break:break-word;
+}
+/* bottom chips row */
+.vc-meta{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  flex-wrap:wrap;
+}
+.vec-chip{
+  display:inline-flex;align-items:center;
+  height:18px;padding:0 5px;
+  font-size:8px;font-family:var(--mono);color:var(--t4);
+  background:rgba(255,255,255,.02);border:1px solid var(--border);
+  border-radius:3px;max-width:150px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;box-sizing:border-box;line-height:1;
+}
+.port-chip{
+  display:inline-flex;align-items:center;
+  height:18px;padding:0 7px;
+  font-size:9px;font-weight:700;font-family:var(--mono);color:var(--t3);
+  background:rgba(255,255,255,.04);border:1px solid var(--border);
+  border-radius:4px;box-sizing:border-box;line-height:1;
+}
+.cwe-chip{
+  display:inline-flex;align-items:center;
+  height:18px;padding:0 6px;
+  font-size:8px;font-family:var(--mono);color:var(--warn);
+  background:rgba(249,115,22,.06);border:1px solid rgba(249,115,22,.18);
+  border-radius:4px;box-sizing:border-box;line-height:1;
+}
+.date-chip{
+  display:inline-flex;align-items:center;
+  height:18px;
+  font-size:8px;font-family:var(--mono);color:var(--t4);line-height:1;
+}
 .empty-s{padding:40px 20px;text-align:center;color:var(--t4);font-family:var(--mono);font-size:12px;display:flex;flex-direction:column;align-items:center;gap:10px}
 .empty-s i{font-size:26px}
 #portGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px;max-height:420px;overflow-y:auto;padding:16px 18px}
