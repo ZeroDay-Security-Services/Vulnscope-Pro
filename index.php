@@ -1443,36 +1443,43 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
 .fb.fh.active{background:var(--warn-dim);border-color:rgba(249,115,22,.3);color:var(--warn)}
 .fb.fm.active{background:var(--med-dim);border-color:rgba(234,179,8,.3);color:var(--med)}
 #vulnList{max-height:560px;overflow-y:auto;display:flex;flex-direction:column;gap:9px;padding:16px 18px}
-.vc{border-radius:var(--r12);padding:14px 16px;border:1px solid var(--border);background:rgba(255,255,255,.016);transition:var(--ease);animation:cin .25s ease both;position:relative;overflow:hidden}
-.vc::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px}
+.vc{border-radius:var(--r12);padding:0;border:1px solid var(--border);background:rgba(255,255,255,.016);transition:border-color .18s ease,background .18s ease;animation:cin .25s ease both;position:relative;overflow:hidden;cursor:pointer}
+.vc::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;transition:opacity .2s}
 .vc.severity-Critical::before{background:var(--danger)}.vc.severity-Critical{border-color:var(--danger-border);background:var(--danger-dim)}
 .vc.severity-High::before{background:var(--warn)}.vc.severity-High{border-color:rgba(249,115,22,.2);background:var(--warn-dim)}
 .vc.severity-Medium::before{background:var(--med)}.vc.severity-Medium{border-color:rgba(234,179,8,.2);background:var(--med-dim)}
 .vc.severity-Low::before{background:var(--low)}.vc.severity-Low{border-color:rgba(34,211,238,.15);background:var(--low-dim)}
 .vc.severity-Info::before,.vc.severity-Unknown::before{background:var(--info)}
 .vc.severity-Info,.vc.severity-Unknown{border-color:var(--border);background:var(--info-dim)}
-.vc:hover{transform:translateX(2px)}
+.vc:hover{border-color:rgba(255,255,255,.12)}
+.vc.expanded{box-shadow:0 4px 24px rgba(0,0,0,.25)}
 @keyframes cin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-.vc-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px;flex-wrap:nowrap}
-.vc-ids{display:flex;align-items:flex-start;flex-direction:column;gap:5px;flex-wrap:wrap;flex:1;min-width:0}
-.vc-id-row{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
-.vc-id{font-family:var(--mono);font-size:13px;font-weight:700;color:var(--accent);line-height:1;display:flex;align-items:center}
-.vc-id a{color:inherit;text-decoration:none}.vc-id a:hover{text-decoration:underline}
-.src-badge{font-size:8px;font-weight:700;font-family:var(--mono);letter-spacing:.09em;text-transform:uppercase;padding:2px 6px;border-radius:4px;background:rgba(255,255,255,.04);color:var(--t3);border:1px solid var(--border2)}
-.sev-tags{display:flex;align-items:center;gap:5px;flex-shrink:0;flex-wrap:wrap}
-.sp{font-size:9px;font-weight:700;font-family:var(--mono);letter-spacing:.07em;text-transform:uppercase;padding:2px 7px;border-radius:5px}
+/* --- Compact header row (always visible) --- */
+.vc-hdr{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 16px;min-height:44px;user-select:none}
+.vc-ids{display:flex;align-items:center;gap:7px;flex:1;min-width:0;flex-wrap:nowrap}
+.vc-id{font-family:var(--mono);font-size:12.5px;font-weight:700;color:var(--accent);line-height:1;white-space:nowrap}
+.vc-id a{color:inherit;text-decoration:none;pointer-events:auto}
+.vc-id a:hover{text-decoration:underline}
+.src-badge{font-size:7.5px;font-weight:700;font-family:var(--mono);letter-spacing:.09em;text-transform:uppercase;padding:1px 5px;border-radius:3px;background:rgba(255,255,255,.04);color:var(--t3);border:1px solid var(--border2);flex-shrink:0}
+.vc-caret{font-size:9px;color:var(--t4);transition:transform .2s ease;flex-shrink:0;margin-left:4px}
+.vc.expanded .vc-caret{transform:rotate(180deg)}
+.sev-tags{display:flex;align-items:center;gap:5px;flex-shrink:0}
+.sp{font-size:9px;font-weight:700;font-family:var(--mono);letter-spacing:.07em;text-transform:uppercase;padding:2px 8px;border-radius:5px}
 .sp.Critical{background:rgba(239,68,68,.14);color:var(--danger);border:1px solid var(--danger-border)}
 .sp.High{background:rgba(249,115,22,.12);color:var(--warn);border:1px solid rgba(249,115,22,.25)}
 .sp.Medium{background:rgba(234,179,8,.12);color:var(--med);border:1px solid rgba(234,179,8,.25)}
 .sp.Low{background:rgba(34,211,238,.08);color:var(--low);border:1px solid rgba(34,211,238,.2)}
 .sp.Info,.sp.Unknown{background:rgba(100,116,139,.09);color:var(--info);border:1px solid var(--border)}
-.cvss-chip{font-size:9px;font-family:var(--mono);font-weight:700;color:#fff;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);padding:2px 8px;border-radius:4px}
+.cvss-chip{font-size:9px;font-family:var(--mono);font-weight:700;color:#e2e8f0;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);padding:2px 8px;border-radius:4px}
+/* --- Expandable body --- */
+.vc-body{max-height:0;overflow:hidden;transition:max-height .28s cubic-bezier(.4,0,.2,1)}
+.vc.expanded .vc-body{max-height:600px}
+.vc-body-inner{padding:0 16px 14px;border-top:1px solid rgba(255,255,255,.05)}
+.vc-svc{font-size:10.5px;color:var(--accent);font-family:var(--mono);display:flex;align-items:center;gap:6px;font-weight:500;padding:10px 0 8px;border-bottom:1px solid rgba(255,255,255,.04);margin-bottom:10px}
+.vc-svc i{font-size:10px;opacity:.7}
+.vc-sum{font-size:11.5px;color:var(--t2);line-height:1.65;margin-bottom:12px;word-break:break-word}
+.vc-meta{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .vec-chip{font-size:8px;font-family:var(--mono);color:var(--t4);background:rgba(255,255,255,.02);border:1px solid var(--border);padding:1px 5px;border-radius:3px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block}
-.vc-sum{font-size:11.5px;color:var(--t2);line-height:1.6;margin-bottom:12px;word-break:break-word}
-.vc-meta{display:flex;align-items:center;justify-content:space-between;padding-top:9px;border-top:1px solid rgba(255,255,255,.04);flex-wrap:wrap;gap:6px}
-.vc-svc{font-size:10.5px;color:var(--accent);font-family:var(--mono);display:flex;align-items:center;gap:6px;font-weight:500;letter-spacing:.02em;margin-top:2px}
-.vc-svc i{color:var(--accent);font-size:10px;opacity:.7}
-.vc-chips{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
 .port-chip{font-size:9px;font-family:var(--mono);font-weight:700;color:var(--t3);background:rgba(255,255,255,.04);border:1px solid var(--border);padding:2px 7px;border-radius:4px}
 .cwe-chip{font-size:8px;font-family:var(--mono);color:var(--warn);background:rgba(249,115,22,.06);border:1px solid rgba(249,115,22,.18);padding:2px 6px;border-radius:4px}
 .date-chip{font-size:8px;font-family:var(--mono);color:var(--t4)}
@@ -1737,37 +1744,38 @@ function renderVulns(f){
   const list=document.getElementById('vulnList');
   if(!f.length){list.innerHTML=`<div class="empty-s"><i class="fas fa-shield-check"></i>No CVE matches found &mdash; target appears well-hardened or services did not match known CVE keywords.</div>`;return}
   list.innerHTML=f.map((v,i)=>{
-    const cveLink=v.id.startsWith('CVE-')?`<a href="https://nvd.nist.gov/vuln/detail/${v.id}" target="_blank" rel="noopener">${v.id}</a>`:v.id;
+    const cveLink=v.id.startsWith('CVE-')?`<a href="https://nvd.nist.gov/vuln/detail/${v.id}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${v.id}</a>`:v.id;
     const cweTag=v.cwe?`<span class="cwe-chip">${v.cwe}</span>`:'';
     const vecTag=v.vector?`<span class="vec-chip" title="${v.vector}">${v.vector.split('/')[0]||''}</span>`:'';
     const dateTag=v.published?`<span class="date-chip">${v.published}</span>`:'';
     const svcIcoClass=svcIco((v.affected_service||'')+' '+(v.source||''));
     const svcRow=v.affected_service?`<div class="vc-svc"><i class="fas ${svcIcoClass}"></i>${v.affected_service}</div>`:'';
-    return `<div class="vc severity-${v.severity||'Info'}" style="animation-delay:${Math.min(i,25)*28}ms">
-      <div class="vc-top">
+    return `<div class="vc severity-${v.severity||'Info'}" style="animation-delay:${Math.min(i,25)*28}ms" onclick="toggleVC(this)">
+      <div class="vc-hdr">
         <div class="vc-ids">
-          <div class="vc-id-row">
-            <span class="vc-id">${cveLink}</span>
-            <span class="src-badge">${v.source}</span>
-          </div>
-          ${svcRow}
+          <span class="vc-id">${cveLink}</span>
+          <span class="src-badge">${v.source}</span>
         </div>
         <div class="sev-tags">
           <span class="sp ${v.severity||'Info'}">${v.severity||'Info'}</span>
           <span class="cvss-chip">CVSS ${v.cvss>0?parseFloat(v.cvss).toFixed(1):'N/A'}</span>
-          ${vecTag}
         </div>
+        <i class="fas fa-chevron-down vc-caret"></i>
       </div>
-      <p class="vc-sum">${v.summary||'No description available.'}</p>
-      <div class="vc-meta">
-        <div class="vc-chips">
-          <span class="port-chip">PORT ${v.port||'—'}</span>
-          ${cweTag}${dateTag}
+      <div class="vc-body">
+        <div class="vc-body-inner">
+          ${svcRow}
+          <p class="vc-sum">${v.summary||'No description available.'}</p>
+          <div class="vc-meta">
+            <span class="port-chip">PORT ${v.port||'—'}</span>
+            ${cweTag}${dateTag}${vecTag}
+          </div>
         </div>
       </div>
     </div>`
   }).join('')
 }
+function toggleVC(el){el.classList.toggle('expanded')}
 function fvulns(sev,btn){document.querySelectorAll('.fb').forEach(b=>b.classList.remove('active'));btn.classList.add('active');renderVulns(sev==='all'?_all:_all.filter(v=>v.severity===sev))}
 function exportReport(){
   if(!_last)return showError('No scan data available yet.');
