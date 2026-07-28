@@ -1466,12 +1466,12 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
 .sp.Medium{background:rgba(234,179,8,.12);color:var(--med);border:1px solid rgba(234,179,8,.25)}
 .sp.Low{background:rgba(34,211,238,.08);color:var(--low);border:1px solid rgba(34,211,238,.2)}
 .sp.Info,.sp.Unknown{background:rgba(100,116,139,.09);color:var(--info);border:1px solid var(--border)}
-.cvss-chip{font-size:9px;font-family:var(--mono);font-weight:700;color:var(--t2);background:rgba(255,255,255,.04);border:1px solid var(--border);padding:2px 7px;border-radius:4px}
+.cvss-chip{font-size:9px;font-family:var(--mono);font-weight:700;color:#fff;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.15);padding:2px 8px;border-radius:4px}
 .vec-chip{font-size:8px;font-family:var(--mono);color:var(--t4);background:rgba(255,255,255,.02);border:1px solid var(--border);padding:1px 5px;border-radius:3px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block}
 .vc-sum{font-size:11.5px;color:var(--t2);line-height:1.6;margin-bottom:12px;word-break:break-word}
 .vc-meta{display:flex;align-items:center;justify-content:space-between;padding-top:9px;border-top:1px solid rgba(255,255,255,.04);flex-wrap:wrap;gap:6px}
-.vc-svc{font-size:10px;color:var(--t4);font-family:var(--mono);display:flex;align-items:center;gap:5px}
-.vc-svc i{color:var(--accent);font-size:9px}
+.vc-svc{font-size:10.5px;color:var(--accent);font-family:var(--mono);display:flex;align-items:center;gap:6px;font-weight:500;letter-spacing:.02em;margin-top:2px}
+.vc-svc i{color:var(--accent);font-size:10px;opacity:.7}
 .vc-chips{display:flex;align-items:center;gap:5px;flex-wrap:wrap}
 .port-chip{font-size:9px;font-family:var(--mono);font-weight:700;color:var(--t3);background:rgba(255,255,255,.04);border:1px solid var(--border);padding:2px 7px;border-radius:4px}
 .cwe-chip{font-size:8px;font-family:var(--mono);color:var(--warn);background:rgba(249,115,22,.06);border:1px solid rgba(249,115,22,.18);padding:2px 6px;border-radius:4px}
@@ -1741,6 +1741,8 @@ function renderVulns(f){
     const cweTag=v.cwe?`<span class="cwe-chip">${v.cwe}</span>`:'';
     const vecTag=v.vector?`<span class="vec-chip" title="${v.vector}">${v.vector.split('/')[0]||''}</span>`:'';
     const dateTag=v.published?`<span class="date-chip">${v.published}</span>`:'';
+    const svcIcoClass=svcIco((v.affected_service||'')+' '+(v.source||''));
+    const svcRow=v.affected_service?`<div class="vc-svc"><i class="fas ${svcIcoClass}"></i>${v.affected_service}</div>`:'';
     return `<div class="vc severity-${v.severity||'Info'}" style="animation-delay:${Math.min(i,25)*28}ms">
       <div class="vc-top">
         <div class="vc-ids">
@@ -1748,7 +1750,7 @@ function renderVulns(f){
             <span class="vc-id">${cveLink}</span>
             <span class="src-badge">${v.source}</span>
           </div>
-          ${v.affected_service ? `<div class="vc-svc"><i class="fas fa-microchip"></i>${v.affected_service}</div>` : ''}
+          ${svcRow}
         </div>
         <div class="sev-tags">
           <span class="sp ${v.severity||'Info'}">${v.severity||'Info'}</span>
@@ -1756,10 +1758,10 @@ function renderVulns(f){
           ${vecTag}
         </div>
       </div>
-      <p class="vc-sum">${v.summary}</p>
+      <p class="vc-sum">${v.summary||'No description available.'}</p>
       <div class="vc-meta">
         <div class="vc-chips">
-          <span class="port-chip">PORT ${v.port}</span>
+          <span class="port-chip">PORT ${v.port||'—'}</span>
           ${cweTag}${dateTag}
         </div>
       </div>
