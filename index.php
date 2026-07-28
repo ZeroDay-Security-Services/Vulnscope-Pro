@@ -42,25 +42,32 @@ if (extension_loaded('pdo_sqlite')) {
             vulnerabilities TEXT,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
         )");
+        // 30-minute scan result cache to make repeat scans instant
+        $db->exec("CREATE TABLE IF NOT EXISTS scan_cache (
+            ip_key TEXT PRIMARY KEY,
+            response_json TEXT,
+            cached_at INTEGER
+        )");
     } catch (Exception $e) {
         error_log('DB init: ' . $e->getMessage());
     }
 }
 
+
 /* =========================================================
-   HTTP HELPER
+   HTTP HELPERS — Sequential & Parallel
    ========================================================= */
-function safe_curl($url, $headers = [], $post_data = null, $timeout = 20) {
+function safe_curl($url, $headers = [], $post_data = null, $timeout = 12) {
     $ch = curl_init($url);
     curl_setopt_array($ch, [
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_TIMEOUT        => $timeout,
-        CURLOPT_CONNECTTIMEOUT => 8,
+        CURLOPT_CONNECTTIMEOUT => 5,
         CURLOPT_USERAGENT      => 'VulnScope-Pro/5.0 (Security Research)',
         CURLOPT_SSL_VERIFYPEER => true,
         CURLOPT_HTTPHEADER     => array_merge(['Accept: application/json'], $headers),
         CURLOPT_FOLLOWLOCATION => true,
-        CURLOPT_MAXREDIRS      => 3,
+        CURLOPT_MAXREDIRS      => 2,
     ]);
     if ($post_data !== null) {
         curl_setopt($ch, CURLOPT_POST, true);
@@ -75,6 +82,54 @@ function safe_curl($url, $headers = [], $post_data = null, $timeout = 20) {
         return null;
     }
     return json_decode($response, true);
+}
+
+/**
+ * Execute multiple HTTP requests in PARALLEL using curl_multi.
+ * @param array $requests  Array of ['url'=>..., 'headers'=>[], 'userpwd'=>null, 'timeout'=>12]
+ * @return array           Decoded JSON results in same order; null on failure.
+ */
+function safe_curl_multi(array $requests): array {
+    $mh      = curl_multi_init();
+    $handles = [];
+
+    foreach ($requests as $i => $req) {
+        $ch = curl_init($req['url']);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => $req['timeout'] ?? 12,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_USERAGENT      => 'VulnScope-Pro/5.0 (Security Research)',
+            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS      => 2,
+            CURLOPT_HTTPHEADER     => array_merge(['Accept: application/json'], $req['headers'] ?? []),
+        ]);
+        if (!empty($req['userpwd'])) {
+            curl_setopt($ch, CURLOPT_USERPWD, $req['userpwd']);
+            curl_setopt($ch, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
+        }
+        curl_multi_add_handle($mh, $ch);
+        $handles[$i] = $ch;
+    }
+
+    // Execute all in parallel
+    $running = null;
+    do {
+        $status = curl_multi_exec($mh, $running);
+        if ($running) curl_multi_select($mh, 0.5);
+    } while ($running && $status === CURLM_OK);
+
+    $results = [];
+    foreach ($handles as $i => $ch) {
+        $body = curl_multi_getcontent($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_multi_remove_handle($mh, $ch);
+        curl_close($ch);
+        $results[$i] = ($code < 400 && $body) ? json_decode($body, true) : null;
+    }
+    curl_multi_close($mh);
+    return $results;
 }
 
 /* =========================================================
@@ -174,24 +229,18 @@ function normalize_product(string $product): string {
 /* =========================================================
    INTELLIGENCE SOURCE: NVD v2
    ========================================================= */
-function query_nvd(string $keyword, int $limit = 40): array {
+function query_nvd(string $keyword, int $limit = 30): array {
     if (!NVD_API_KEY || strlen(trim($keyword)) < 2) return [];
 
     $headers = ['apiKey: ' . NVD_API_KEY];
     $results = [];
     $seen    = [];
 
-    // Query 1: keyword search
+    // Single keyword search (removed duplicate exactMatch call — saves 50% NVD time)
     $url1 = NVD_API_BASE . '?keywordSearch=' . urlencode($keyword) . '&resultsPerPage=' . $limit;
-    $res1 = safe_curl($url1, $headers);
+    $res1 = safe_curl($url1, $headers, null, 12);
 
-    // Query 2: if keyword is a product name, also try CPE match
-    // We run two passes: keyword + CPE for more coverage
-    $url2 = NVD_API_BASE . '?keywordSearch=' . urlencode(str_replace(' ', '+', $keyword))
-          . '&keywordExactMatch&resultsPerPage=' . (int)($limit / 2);
-    $res2 = safe_curl($url2, $headers);
-
-    foreach ([$res1, $res2] as $res) {
+    foreach ([$res1] as $res) {
         if (!isset($res['vulnerabilities'])) continue;
         foreach ($res['vulnerabilities'] as $v) {
             $cve = $v['cve'];
@@ -508,55 +557,93 @@ function extract_censys_services(array $censys): array {
 }
 
 /* =========================================================
-   PORT SCANNER — PHP socket fallback (when nmap not available)
+   PORT SCANNER — Parallel PHP socket scan (async connect)
    ========================================================= */
 function php_socket_scan(string $host, string $ip): string {
     $port_map = [
-        21   => ['ftp',         'vsftpd'],
-        22   => ['ssh',         'OpenSSH'],
-        23   => ['telnet',      'Linux telnetd'],
-        25   => ['smtp',        'Postfix smtpd'],
-        53   => ['domain',      'ISC BIND'],
-        80   => ['http',        'Apache httpd'],
-        110  => ['pop3',        'Dovecot pop3d'],
-        111  => ['rpcbind',     'rpcbind'],
-        135  => ['msrpc',       'Microsoft RPC'],
-        139  => ['netbios-ssn', 'Samba smbd'],
-        143  => ['imap',        'Dovecot imapd'],
-        443  => ['https',       'Apache httpd'],
-        445  => ['microsoft-ds','Samba smbd'],
-        465  => ['smtps',       'Postfix smtpd'],
-        587  => ['submission',  'Postfix smtpd'],
-        993  => ['imaps',       'Dovecot imapd'],
-        995  => ['pop3s',       'Dovecot pop3d'],
-        1433 => ['ms-sql-s',   'Microsoft SQL Server'],
-        1521 => ['oracle',      'Oracle TNS listener'],
-        2375 => ['docker',      'Docker API (unauthenticated)'],
-        3000 => ['http',        'Node.js Express'],
-        3306 => ['mysql',       'MySQL'],
+        21   => ['ftp',          'vsftpd'],
+        22   => ['ssh',          'OpenSSH'],
+        23   => ['telnet',       'Linux telnetd'],
+        25   => ['smtp',         'Postfix smtpd'],
+        53   => ['domain',       'ISC BIND'],
+        80   => ['http',         'Apache httpd'],
+        110  => ['pop3',         'Dovecot pop3d'],
+        111  => ['rpcbind',      'rpcbind'],
+        135  => ['msrpc',        'Microsoft RPC'],
+        139  => ['netbios-ssn',  'Samba smbd'],
+        143  => ['imap',         'Dovecot imapd'],
+        443  => ['https',        'Apache httpd'],
+        445  => ['microsoft-ds', 'Samba smbd'],
+        465  => ['smtps',        'Postfix smtpd'],
+        587  => ['submission',   'Postfix smtpd'],
+        993  => ['imaps',        'Dovecot imapd'],
+        995  => ['pop3s',        'Dovecot pop3d'],
+        1433 => ['ms-sql-s',    'Microsoft SQL Server'],
+        1521 => ['oracle',       'Oracle TNS listener'],
+        2375 => ['docker',       'Docker API (unauthenticated)'],
+        3000 => ['http',         'Node.js Express'],
+        3306 => ['mysql',        'MySQL'],
         3389 => ['ms-wbt-server','Microsoft RDP'],
-        5432 => ['postgresql',  'PostgreSQL'],
-        5900 => ['vnc',         'RealVNC'],
-        5985 => ['wsman',       'Windows WinRM'],
-        6379 => ['redis',       'Redis'],
-        8080 => ['http-proxy',  'Apache Tomcat'],
-        8443 => ['https-alt',   'Apache Tomcat'],
-        8888 => ['http',        'Jupyter Notebook'],
-        9000 => ['http',        'PHP-FPM'],
-        9200 => ['http',        'Elasticsearch'],
-        27017=> ['mongodb',     'MongoDB'],
+        5432 => ['postgresql',   'PostgreSQL'],
+        5900 => ['vnc',          'RealVNC'],
+        5985 => ['wsman',        'Windows WinRM'],
+        6379 => ['redis',        'Redis'],
+        8080 => ['http-proxy',   'Apache Tomcat'],
+        8443 => ['https-alt',    'Apache Tomcat'],
+        8888 => ['http',         'Jupyter Notebook'],
+        9000 => ['http',         'PHP-FPM'],
+        9200 => ['http',         'Elasticsearch'],
+        27017=> ['mongodb',      'MongoDB'],
     ];
 
+    // --- Phase 1: Open all connections in parallel (non-blocking) ---
+    $sockets = [];
+    foreach ($port_map as $port => $info) {
+        $ctx = stream_context_create(['socket' => ['so_reuseaddr' => true]]);
+        $sock = @stream_socket_client(
+            "tcp://{$ip}:{$port}",
+            $errno, $errstr, 1.2,
+            STREAM_CLIENT_ASYNC_CONNECT | STREAM_CLIENT_CONNECT,
+            $ctx
+        );
+        if ($sock !== false) {
+            stream_set_blocking($sock, false);
+            $sockets[$port] = $sock;
+        }
+    }
+
+    // --- Phase 2: Wait up to 1.5s for any sockets to become writable (= connected) ---
+    $open_ports = [];
+    if (!empty($sockets)) {
+        $read  = null;
+        $write = array_values($sockets);
+        $excpt = null;
+        $ready = @stream_select($read, $write, $excpt, 1, 500000); // 1.5s
+        if ($ready) {
+            // Map writable sockets back to their ports
+            $port_by_sock = array_flip(array_map('intval', array_keys($sockets)));
+            foreach ($write as $ws) {
+                foreach ($sockets as $port => $sock) {
+                    if ($sock === $ws) { $open_ports[$port] = true; break; }
+                }
+            }
+        }
+    }
+
+    // --- Phase 3: Banner grab only open ports (with short timeout) ---
+    $banner_ports = [21, 22, 25, 110, 143, 3306];
     $xml_ports = '';
     foreach ($port_map as $port => [$svcname, $product]) {
-        $fp = @fsockopen($ip, $port, $errno, $errstr, 1.5);
-        if ($fp === false) continue;
-
+        if (!isset($open_ports[$port])) {
+            if (isset($sockets[$port])) fclose($sockets[$port]);
+            continue;
+        }
+        $sock    = $sockets[$port];
         $version = '';
-        // Banner grab for plaintext services
-        if (in_array($port, [21, 22, 25, 110, 143, 3306])) {
-            stream_set_timeout($fp, 2);
-            $banner = @fgets($fp, 512);
+        if (in_array($port, $banner_ports) && $sock) {
+            stream_set_blocking($sock, true);
+            stream_set_timeout($sock, 1);
+            $banner = @fgets($sock, 256);
             if ($banner) {
                 $version = htmlspecialchars(
                     substr(trim(preg_replace('/[^\x20-\x7E]/', '', $banner)), 0, 80),
@@ -564,7 +651,7 @@ function php_socket_scan(string $host, string $ip): string {
                 );
             }
         }
-        fclose($fp);
+        if ($sock) fclose($sock);
 
         $p_safe  = htmlspecialchars($product, ENT_XML1);
         $xml_ports .= "<port protocol=\"tcp\" portid=\"{$port}\">"
@@ -729,6 +816,25 @@ if (isset($_GET['action'])) {
             $host = $validation['host'];
             $ip   = $validation['ip'];
 
+            /* ---- Cache check: return cached result if < 30 minutes old ---- */
+            $cache_ttl = 1800; // 30 minutes
+            if ($db) {
+                try {
+                    $cs = $db->prepare('SELECT response_json, cached_at FROM scan_cache WHERE ip_key = ?');
+                    $cs->execute([$ip]);
+                    $crow = $cs->fetch(PDO::FETCH_ASSOC);
+                    if ($crow && (time() - (int)$crow['cached_at'] < $cache_ttl)) {
+                        $cached = json_decode($crow['response_json'], true);
+                        if ($cached) {
+                            $cached['cached'] = true;
+                            $cached['cached_at'] = date('Y-m-d H:i:s', (int)$crow['cached_at']);
+                            echo json_encode($cached, JSON_UNESCAPED_UNICODE);
+                            exit;
+                        }
+                    }
+                } catch (Exception $e) { /* cache miss — proceed with full scan */ }
+            }
+
             /* ---- 1. Port Scan ---- */
             $nmap_xml   = run_nmap($host);
             $xml        = @simplexml_load_string($nmap_xml);
@@ -757,7 +863,8 @@ if (isset($_GET['action'])) {
                 }
             };
 
-            /* ---- 2. Parse scan results & query CVEs per service ---- */
+            /* ---- 2. Parse scan results & query CVEs per service (collect keywords first) ---- */
+            $all_kw_map = []; // keyword => [['port_id'=>.., 'service_label'=>..], ...]
             if ($xml && isset($xml->host->ports->port)) {
                 foreach ($xml->host->ports->port as $p) {
                     $state = (string)($p->state['state'] ?? '');
@@ -812,20 +919,20 @@ if (isset($_GET['action'])) {
                     $keywords = array_unique(array_filter($keywords));
                     $service_label = trim("$product $version") ?: "Port $port_id";
 
-                    foreach ($keywords as $kw) {
-                        if (strlen(trim($kw)) < 2) continue;
+                    // Limit keyword sprawl for inferred/tcpwrapped ports
+                    $was_inferred = !empty($inferred_products);
+                    if ($was_inferred) {
+                        // For tcpwrapped ports: only use the 1 most specific keyword
+                        $keywords = array_slice($keywords, 0, 1);
+                    } else {
+                        // For identified products: cap at 3 keywords max
+                        $keywords = array_slice($keywords, 0, 3);
+                    }
 
-                        // NVD v2
-                        foreach (query_nvd($kw, 25) as $hit) {
-                            $add_finding($hit, $port_id, $service_label);
-                        }
-                        // CIRCL (free, no key needed)
-                        foreach (query_circl($kw, 15) as $hit) {
-                            $add_finding($hit, $port_id, $service_label);
-                        }
-                        // OpenCVE v2
-                        foreach (query_opencve($kw, 20) as $hit) {
-                            $add_finding($hit, $port_id, $service_label);
+                    // Accumulate keywords for batch processing (dedup across all ports)
+                    foreach ($keywords as $kw) {
+                        if (strlen(trim($kw)) >= 2) {
+                            $all_kw_map[$kw][] = ['port_id' => $port_id, 'service_label' => $service_label];
                         }
                     }
 
@@ -888,6 +995,145 @@ if (isset($_GET['action'])) {
                                     'port'            => $port_id,
                                 ];
                             }
+                        }
+                    }
+                }
+            }
+
+            /* ---- 2b. Batch parallel CVE queries for all collected keywords ---- */
+            if (!empty($all_kw_map)) {
+                $unique_kws = array_keys($all_kw_map);
+                $requests   = [];
+                $req_meta   = []; // maps request index -> [source, keyword]
+
+                foreach ($unique_kws as $kw) {
+                    $kw_enc = urlencode($kw);
+                    // NVD request
+                    if (NVD_API_KEY) {
+                        $req_meta[] = ['source' => 'nvd', 'kw' => $kw];
+                        $requests[] = [
+                            'url'     => NVD_API_BASE . '?keywordSearch=' . $kw_enc . '&resultsPerPage=25',
+                            'headers' => ['apiKey: ' . NVD_API_KEY],
+                            'timeout' => 12,
+                        ];
+                    }
+                    // CIRCL request
+                    $req_meta[] = ['source' => 'circl', 'kw' => $kw];
+                    $requests[] = [
+                        'url'     => CIRCL_API_BASE . 'search/' . $kw_enc,
+                        'headers' => [],
+                        'timeout' => 10,
+                    ];
+                    // OpenCVE request
+                    if (OPENCVE_USER && OPENCVE_PASS) {
+                        $req_meta[] = ['source' => 'opencve', 'kw' => $kw];
+                        $requests[] = [
+                            'url'     => OPENCVE_API_BASE . 'cves?search=' . $kw_enc . '&limit=20',
+                            'headers' => ['Accept: application/json'],
+                            'userpwd' => OPENCVE_USER . ':' . OPENCVE_PASS,
+                            'timeout' => 12,
+                        ];
+                    }
+                }
+
+                // Fire ALL API calls in parallel
+                $responses = safe_curl_multi($requests);
+
+                // Process each response
+                foreach ($responses as $i => $data) {
+                    if (!$data || !is_array($data)) continue;
+                    $meta = $req_meta[$i];
+                    $kw   = $meta['kw'];
+                    $src  = $meta['source'];
+
+                    $hits = [];
+                    if ($src === 'nvd') {
+                        // Parse NVD response
+                        foreach ($data['vulnerabilities'] ?? [] as $v) {
+                            $cve   = $v['cve'] ?? [];
+                            $id    = $cve['id'] ?? '';
+                            if (!$id) continue;
+                            $score = 0; $vector = '';
+                            foreach (['cvssMetricV31','cvssMetricV30','cvssMetricV2'] as $mk) {
+                                if (!empty($cve['metrics'][$mk])) {
+                                    $m = $cve['metrics'][$mk][0];
+                                    $score  = $m['cvssData']['baseScore'] ?? 0;
+                                    $vector = $m['cvssData']['vectorString'] ?? '';
+                                    break;
+                                }
+                            }
+                            $desc = 'No description.';
+                            foreach ($cve['descriptions'] ?? [] as $d) {
+                                if ($d['lang'] === 'en') { $desc = $d['value']; break; }
+                            }
+                            $cwe = '';
+                            foreach ($cve['weaknesses'] ?? [] as $w) {
+                                $cwe = $w['description'][0]['value'] ?? ''; if ($cwe) break;
+                            }
+                            $hits[] = [
+                                'id' => $id, 'cvss' => (float)$score,
+                                'severity' => classify_severity($score), 'summary' => $desc,
+                                'source' => 'NVD', 'vector' => $vector, 'cwe' => $cwe,
+                                'published' => substr($cve['published'] ?? '', 0, 10),
+                            ];
+                        }
+                    } elseif ($src === 'circl') {
+                        // Parse CIRCL response
+                        $items = isset($data[0]) ? $data : ($data['results'] ?? []);
+                        foreach (array_slice($items, 0, 15) as $cve) {
+                            $id = $cve['id'] ?? ($cve['cve_id'] ?? '');
+                            if (!$id) continue;
+                            $score = (float)($cve['cvss'] ?? $cve['cvss_score'] ?? 0);
+                            $hits[] = [
+                                'id' => $id, 'cvss' => $score,
+                                'severity' => classify_severity($score),
+                                'summary' => $cve['summary'] ?? $cve['description'] ?? 'No summary.',
+                                'source' => 'CIRCL', 'vector' => $cve['cvss-vector'] ?? '',
+                                'cwe' => $cve['cwe'] ?? '',
+                                'published' => substr($cve['Published'] ?? $cve['published'] ?? '', 0, 10),
+                            ];
+                        }
+                    } elseif ($src === 'opencve') {
+                        // Parse OpenCVE response
+                        $items = $data['results'] ?? $data;
+                        if (!is_array($items)) continue;
+                        foreach (array_slice($items, 0, 20) as $item) {
+                            $id = $item['cve_id'] ?? $item['id'] ?? '';
+                            if (!$id) continue;
+                            $score = 0; $vector = '';
+                            foreach (['cvssV31','cvssV30','cvssV2'] as $mk) {
+                                if (!empty($item['metrics'][$mk]['data']['score'])) {
+                                    $score  = (float)$item['metrics'][$mk]['data']['score'];
+                                    $vector = $item['metrics'][$mk]['data']['vector'] ?? '';
+                                    break;
+                                }
+                            }
+                            if (!$score && isset($item['cvss'])) $score = (float)$item['cvss'];
+                            $desc = '';
+                            if (!empty($item['description'])) {
+                                if (is_string($item['description'])) $desc = $item['description'];
+                                elseif (is_array($item['description'])) {
+                                    foreach ($item['description'] as $d) {
+                                        if (($d['lang']??'') === 'en') { $desc = $d['value']; break; }
+                                    }
+                                    if (!$desc) $desc = $item['description'][0]['value'] ?? '';
+                                }
+                            }
+                            $hits[] = [
+                                'id' => $id, 'cvss' => $score,
+                                'severity' => classify_severity($score),
+                                'summary' => $desc ?: 'No description.',
+                                'source' => 'OpenCVE', 'vector' => $vector,
+                                'cwe' => $item['cwe'] ?? '',
+                                'published' => substr($item['created_at'] ?? $item['published'] ?? '', 0, 10),
+                            ];
+                        }
+                    }
+
+                    // Associate hits with their ports
+                    foreach ($hits as $hit) {
+                        foreach ($all_kw_map[$kw] as $ctx) {
+                            $add_finding($hit, $ctx['port_id'], $ctx['service_label']);
                         }
                     }
                 }
@@ -1008,7 +1254,7 @@ if (isset($_GET['action'])) {
                 ],
             ];
 
-            /* ---- 7. Persist to DB ---- */
+            /* ---- 7. Persist to DB & cache ---- */
             if ($db) {
                 try {
                     $stmt = $db->prepare(
@@ -1021,12 +1267,18 @@ if (isset($_GET['action'])) {
                         json_encode($response['debug_info']),
                         json_encode($findings),
                     ]);
+                    // Write to scan cache (REPLACE = upsert)
+                    $cstmt = $db->prepare(
+                        'INSERT OR REPLACE INTO scan_cache (ip_key, response_json, cached_at) VALUES (?, ?, ?)'
+                    );
+                    $cstmt->execute([$ip, json_encode($response, JSON_UNESCAPED_UNICODE), time()]);
                 } catch (Exception $e) {
                     error_log('DB insert: ' . $e->getMessage());
                 }
             }
 
             echo json_encode($response, JSON_UNESCAPED_UNICODE);
+
 
         } catch (Exception $e) {
             http_response_code(500);
