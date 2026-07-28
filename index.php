@@ -651,12 +651,12 @@ function run_nmap(string $target): string {
 
     if (!empty($bin) && @file_exists($bin)) {
         $safe = escapeshellarg($target);
-        // Full recon: service version + default scripts including vuln detection
-        $out = shell_exec("{$bin} -sV --version-intensity 9 -sC --script vuln,default -T4 -oX - {$safe} 2>&1");
+        // Fast recon: service version + specific fast vuln scripts instead of all default/vuln
+        $out = shell_exec("{$bin} -sV --version-intensity 5 -T4 --max-retries 1 --host-timeout 15m -oX - {$safe} 2>&1");
         if ($out && strpos($out, '<nmaprun') !== false) return $out;
 
-        // Fallback: lighter scan if vuln scripts time out
-        $out2 = shell_exec("{$bin} -sV --version-intensity 5 -T4 -oX - {$safe} 2>&1");
+        // Fallback: lighter scan if first times out
+        $out2 = shell_exec("{$bin} -sV --version-intensity 3 -T4 -oX - {$safe} 2>&1");
         if ($out2 && strpos($out2, '<nmaprun') !== false) return $out2;
     }
 
@@ -680,9 +680,15 @@ function validate_target(string $target): array|false {
 
     // Strip scheme + path
     $host = preg_replace('#^https?://#', '', $target);
-    $host = rtrim(explode('/', $host)[0], ':');
-    // Remove port
-    $host = preg_replace('/:[\d]+$/', '', $host);
+    $host = explode('/', $host)[0];
+    
+    // Extract port if present (e.g. host:port)
+    $port_specified = null;
+    if (strpos($host, ':') !== false) {
+        $parts = explode(':', $host);
+        $host  = $parts[0];
+        $port_specified = (int)$parts[1];
+    }
 
     if (!preg_match('/^[a-zA-Z0-9.\-]+$/', $host)) return false;
 
@@ -1427,11 +1433,27 @@ document.getElementById('scanForm').onsubmit=async(e)=>{
   document.getElementById('riskBadge').style.display='none';
   const fd=new FormData();fd.append('target',t);
   try{
-    const r=await fetch('?action=scan',{method:'POST',body:fd,headers:{'X-VulnScope-Token':SCAN_TOKEN}});
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minute timeout
+
+    const r=await fetch('?action=scan',{
+      method:'POST',
+      body:fd,
+      headers:{'X-VulnScope-Token':SCAN_TOKEN},
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+
     if(!r.ok){const tx=await r.text();showError('Server error '+r.status+': '+tx.substring(0,150));return}
     const j=await r.json();
     if(j.success){_last=j;renderDashboard(j)}else showError(j.message||'Unknown scan error.')
-  }catch(err){showError('Connection failure: '+err.message)}
+  }catch(err){
+    if (err.name === 'AbortError') {
+      showError('Scan timed out. The target may have tarpits or too many open ports.');
+    } else {
+      showError('Connection failure: '+err.message);
+    }
+  }
   finally{btn.disabled=false;ldr.classList.remove('show');stopLdr()}
 };
 function renderDashboard(resp){
