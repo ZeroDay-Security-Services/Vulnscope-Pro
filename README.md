@@ -62,13 +62,45 @@ If you have PHP installed directly on your machine, you can use its built-in dev
 
 ---
 
+## 🔑 Required API Keys & Environment Variables
+
+Vulnscope-Pro relies on external Intelligence APIs to function properly. You must provide the following environment variables:
+
+1. `NVD_API_KEY`: Your API key for the National Vulnerability Database (NVD v2).
+2. `SHODAN_API_KEY`: Your Shodan API key for threat intelligence and open port analysis.
+3. `CENSYS_API_TOKEN`: Your Censys v2 Bearer Token for advanced internet-wide scanning data.
+
+### Setting Variables in Linux / Ubuntu
+
+If you are running the application natively on a Linux machine (e.g., Ubuntu), you can set these variables permanently by adding them to your system's profile.
+
+1. Open your bash profile or environment file:
+   ```bash
+   nano ~/.bashrc
+   ```
+2. Add the following lines at the bottom of the file (replace with your actual keys):
+   ```bash
+   export NVD_API_KEY="your_nvd_api_key_here"
+   export SHODAN_API_KEY="your_shodan_api_key_here"
+   export CENSYS_API_TOKEN="your_censys_api_token_here"
+   ```
+3. Save the file (`Ctrl+O`, `Enter`, `Ctrl+X`) and reload your profile:
+   ```bash
+   source ~/.bashrc
+   ```
+
+*(If you are using Docker, you can pass these variables in your run command using `-e KEY="value"` or by creating a `.env` file and using `--env-file .env`)*.
+
+---
+
 ## ☁️ Production Deployment
 
 ### Render
 This project includes a `Dockerfile` pre-configured for deployment on Render's Web Services.
 1. Connect this repository to your Render account.
 2. Create a new **Web Service**.
-3. Render will automatically detect the Dockerfile and deploy the application.
+3. Under **Environment Variables**, add `NVD_API_KEY`, `SHODAN_API_KEY`, and `CENSYS_API_TOKEN` with their respective values.
+4. Render will automatically detect the Dockerfile and deploy the application.
 
 ---
 *© ZeroDay Security Services. All rights reserved.*
