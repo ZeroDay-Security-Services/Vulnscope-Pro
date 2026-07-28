@@ -1204,7 +1204,7 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
 .vc-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px;flex-wrap:nowrap}
 .vc-ids{display:flex;align-items:flex-start;flex-direction:column;gap:5px;flex-wrap:wrap;flex:1;min-width:0}
 .vc-id-row{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
-.vc-id{font-family:var(--mono);font-size:13px;font-weight:700;color:var(--accent)}
+.vc-id{font-family:var(--mono);font-size:13px;font-weight:700;color:var(--accent);line-height:1;display:flex;align-items:center}
 .vc-id a{color:inherit;text-decoration:none}.vc-id a:hover{text-decoration:underline}
 .src-badge{font-size:8px;font-weight:700;font-family:var(--mono);letter-spacing:.09em;text-transform:uppercase;padding:2px 6px;border-radius:4px;background:rgba(255,255,255,.04);color:var(--t3);border:1px solid var(--border2)}
 .sev-tags{display:flex;align-items:center;gap:5px;flex-shrink:0;flex-wrap:wrap}
