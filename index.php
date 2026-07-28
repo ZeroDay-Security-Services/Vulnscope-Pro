@@ -979,8 +979,8 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
 .open-pill{font-size:7px;font-weight:700;font-family:var(--mono);color:#22c55e;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2);padding:1px 4px;border-radius:3px;letter-spacing:.06em}
 .svc-port{font-family:var(--mono);font-size:10px;color:var(--accent);font-weight:600;margin-bottom:2px}
 .svc-prod{font-size:9px;color:var(--t4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-#error-toast{position:fixed;bottom:20px;right:20px;z-index:9999;background:rgba(20,5,5,.97);border:1px solid rgba(239,68,68,.35);color:var(--t1);padding:12px 16px;border-radius:var(--r12);display:flex;align-items:center;gap:10px;max-width:380px;backdrop-filter:blur(16px);box-shadow:0 8px 32px rgba(0,0,0,.5);transform:translateY(110%);transition:transform .3s cubic-bezier(.34,1.56,.64,1)}
-#error-toast.show{transform:translateY(0)}
+#error-toast{position:fixed;bottom:20px;right:20px;z-index:9999;background:rgba(20,5,5,.97);border:1px solid rgba(239,68,68,.35);color:var(--t1);padding:12px 16px;border-radius:var(--r12);display:flex;align-items:center;gap:10px;max-width:380px;backdrop-filter:blur(16px);box-shadow:0 8px 32px rgba(0,0,0,.5);transform:translateY(120%);opacity:0;pointer-events:none;transition:transform .3s cubic-bezier(.34,1.56,.64,1),opacity .25s ease}
+#error-toast.show{transform:translateY(0);opacity:1;pointer-events:auto}
 .t-ico{width:30px;height:30px;border-radius:8px;background:rgba(239,68,68,.12);display:flex;align-items:center;justify-content:center;color:var(--danger);font-size:12px;flex-shrink:0}
 .t-body{flex:1}
 .t-ttl{font-size:10px;font-weight:700;color:var(--danger);margin-bottom:2px;text-transform:uppercase;letter-spacing:.06em}
@@ -1006,7 +1006,7 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
 <div id="shell">
 <aside id="sb">
   <div class="sb-logo">
-    <div class="sb-logo-ico"><i class="fas fa-shield-halved"></i></div>
+    <img src="logo.png" alt="VulnScope Pro" style="width:38px;height:38px;object-fit:contain;border-radius:8px;flex-shrink:0;filter:drop-shadow(0 0 8px rgba(6,182,212,.5))" onerror="this.style.display='none'">
     <div class="sb-logo-txt"><h2>VulnScope <span>Pro</span></h2><p>Intelligence Platform v5.0</p></div>
   </div>
   <nav class="sb-nav">
@@ -1041,10 +1041,8 @@ foreach ($_alist as $_ak => $_al):
     <div class="tb-left">
       <button id="sbtoggle" onclick="toggleSB()"><i class="fas fa-bars"></i></button>
       <div class="tb-bread">
-        <i class="fas fa-shield-halved" style="color:var(--accent);font-size:12px"></i>
-        <span>VulnScope</span>
-        <i class="fas fa-chevron-right"></i>
-        <span class="cr-active">Attack Surface Assessment</span>
+        <i class="fas fa-shield-halved" style="color:var(--accent);font-size:13px"></i>
+        <span class="cr-active">Vulnerability Intelligence Console</span>
       </div>
     </div>
     <div class="tb-right">
