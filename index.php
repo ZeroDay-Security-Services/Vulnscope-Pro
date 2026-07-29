@@ -1646,12 +1646,14 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
     <div class="nav-lbl">Platform</div>
     <a class="nav-a active" href="#" onclick="return false"><i class="fas fa-radar"></i>Scan Console</a>
     <a class="nav-a" href="#" onclick="toResults();return false"><i class="fas fa-shield-halved"></i>Intelligence Feed</a>
+    <a class="nav-a" href="#" onclick="toAttackProb();return false"><i class="fas fa-chart-simple"></i>Attack Probability</a>
     <a class="nav-a" href="#" onclick="toInfra();return false"><i class="fas fa-network-wired"></i>Infrastructure Map</a>
     <div class="nav-lbl" style="margin-top:6px">Sources</div>
     <a class="nav-a" href="https://nvd.nist.gov/" target="_blank" rel="noopener"><i class="fas fa-database"></i>NVD / NIST</a>
     <a class="nav-a" href="https://www.shodan.io/" target="_blank" rel="noopener"><i class="fas fa-eye"></i>Shodan</a>
     <a class="nav-a" href="https://search.censys.io/" target="_blank" rel="noopener"><i class="fas fa-satellite-dish"></i>Censys</a>
     <a class="nav-a" href="https://cve.circl.lu/" target="_blank" rel="noopener"><i class="fas fa-circle-nodes"></i>CIRCL CVE</a>
+    <a class="nav-a" href="https://www.opencve.io/" target="_blank" rel="noopener"><i class="fas fa-shield-halved"></i>OpenCVE</a>
   </nav>
   <div class="sb-apis">
     <div class="sb-api-lbl">API Source Status</div>
@@ -1823,6 +1825,7 @@ window.addEventListener('scroll',function(){
   if(sb&&sb.classList.contains('open'))closeSB();
 },{passive:true});
 function toResults(){const e=document.getElementById('results');if(e)e.scrollIntoView({behavior:'smooth'})}
+function toAttackProb(){const e=document.getElementById('attackProbPanel');if(e)e.scrollIntoView({behavior:'smooth'})}
 function toInfra(){const e=document.getElementById('infra-section');if(e)e.scrollIntoView({behavior:'smooth'})}
 function showError(m){document.getElementById('error-msg').innerText=m;document.getElementById('error-toast').classList.add('show');setTimeout(hideError,7000)}
 function hideError(){document.getElementById('error-toast').classList.remove('show')}
@@ -1937,14 +1940,26 @@ function buildAttackProbabilities(findings){
   const cats=[
     {name:'Remote Code Execution',cwes:['CWE-94','CWE-78','CWE-77','CWE-502','CWE-434'],avBoost:'N',base:0},
     {name:'SQL Injection',cwes:['CWE-89','CWE-564'],avBoost:'N',base:0},
+    {name:'Command Injection',cwes:['CWE-77','CWE-78','CWE-88'],avBoost:'N',base:0},
     {name:'Cross-Site Scripting',cwes:['CWE-79','CWE-80'],avBoost:'N',base:0},
+    {name:'Cross-Site Request Forgery',cwes:['CWE-352'],avBoost:'N',base:0},
     {name:'Authentication Bypass',cwes:['CWE-287','CWE-306','CWE-862','CWE-863'],avBoost:'N',base:0},
+    {name:'Broken Access Control',cwes:['CWE-284','CWE-285','CWE-639','CWE-441'],avBoost:'N',base:0},
     {name:'Path Traversal',cwes:['CWE-22','CWE-23','CWE-36'],avBoost:'N',base:0},
     {name:'Denial of Service',cwes:['CWE-400','CWE-770','CWE-399'],avBoost:'N',base:0},
     {name:'Information Disclosure',cwes:['CWE-200','CWE-209','CWE-532'],avBoost:'N',base:0},
     {name:'Privilege Escalation',cwes:['CWE-269','CWE-250'],avBoost:'L',base:0},
     {name:'Buffer Overflow',cwes:['CWE-119','CWE-120','CWE-122','CWE-787'],avBoost:'N',base:0},
-    {name:'Cryptographic Weakness',cwes:['CWE-327','CWE-326','CWE-295','CWE-310'],avBoost:'N',base:0}
+    {name:'Memory Corruption',cwes:['CWE-416','CWE-415','CWE-476','CWE-825'],avBoost:'N',base:0},
+    {name:'Cryptographic Weakness',cwes:['CWE-327','CWE-326','CWE-295','CWE-310'],avBoost:'N',base:0},
+    {name:'Server-Side Request Forgery',cwes:['CWE-918'],avBoost:'N',base:0},
+    {name:'XML External Entity',cwes:['CWE-611','CWE-827'],avBoost:'N',base:0},
+    {name:'Insecure Deserialization',cwes:['CWE-502'],avBoost:'N',base:0},
+    {name:'Security Misconfiguration',cwes:['CWE-16','CWE-2','CWE-1188','CWE-1391'],avBoost:'N',base:0},
+    {name:'Hardcoded / Default Credentials',cwes:['CWE-798','CWE-259'],avBoost:'N',base:0},
+    {name:'Session Management Flaw',cwes:['CWE-384','CWE-613'],avBoost:'N',base:0},
+    {name:'Race Condition',cwes:['CWE-362','CWE-367'],avBoost:'L',base:0},
+    {name:'Insufficient Logging & Monitoring',cwes:['CWE-778','CWE-223'],avBoost:'L',base:0}
   ];
   const sevW={Critical:1,High:.75,Medium:.45,Low:.2,Info:.05,Unknown:.05};
   for(const f of findings){
