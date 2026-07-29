@@ -1,6 +1,6 @@
-<?php
+﻿<?php
 /**
- * VulnScope Pro — Enterprise Intelligence Engine v5.0
+ * VulnScope Pro Ã¢â‚¬â€ Enterprise Intelligence Engine v5.0
  * Multi-source CVE correlation: NVD v2, Shodan, Censys v2, CIRCL CVE Search
  */
 
@@ -12,7 +12,7 @@ defined('DB_PATH')            or define('DB_PATH', 'vulnscope_v2.sqlite');
 defined('SCAN_TOKEN')         or define('SCAN_TOKEN', 'SECURE_SCAN_TOKEN_2024');
 defined('ALLOW_INTERNAL_SCAN') or define('ALLOW_INTERNAL_SCAN', true);
 
-// API keys — loaded from environment variables (set in Render dashboard or .env)
+// API keys Ã¢â‚¬â€ loaded from environment variables (set in Render dashboard or .env)
 defined('NVD_API_KEY')      or define('NVD_API_KEY',      getenv('NVD_API_KEY')      ?: '');
 defined('SHODAN_API_KEY')   or define('SHODAN_API_KEY',   getenv('SHODAN_API_KEY')   ?: '');
 defined('CENSYS_API_TOKEN') or define('CENSYS_API_TOKEN', getenv('CENSYS_API_TOKEN') ?: '');
@@ -55,7 +55,7 @@ if (extension_loaded('pdo_sqlite')) {
 
 
 /* =========================================================
-   HTTP HELPERS — Sequential & Parallel
+   HTTP HELPERS Ã¢â‚¬â€ Sequential & Parallel
    ========================================================= */
 function safe_curl($url, $headers = [], $post_data = null, $timeout = 12) {
     $ch = curl_init($url);
@@ -78,7 +78,7 @@ function safe_curl($url, $headers = [], $post_data = null, $timeout = 12) {
     $err      = curl_error($ch);
     curl_close($ch);
     if ($err || $code >= 400 || !$response) {
-        error_log("safe_curl [$code] $url — $err");
+        error_log("safe_curl [$code] $url Ã¢â‚¬â€ $err");
         return null;
     }
     return json_decode($response, true);
@@ -154,7 +154,7 @@ function classify_severity($cvss) {
 }
 
 /**
- * Advanced risk scoring — produces realistic varied scores.
+ * Advanced risk scoring Ã¢â‚¬â€ produces realistic varied scores.
  *
  * Algorithm:
  * 1. Base weighted score from severity buckets
@@ -185,14 +185,14 @@ function calculate_risk_score(array $findings, int $open_ports_count = 0): int {
     $avg_cvss   = count($findings) > 0 ? $cvss_sum / count($findings) : 0;
     $cvss_bonus = min(20, round($avg_cvss * 2.2));
 
-    // Step 3: Attack surface multiplier — more open ports = wider exposure
+    // Step 3: Attack surface multiplier Ã¢â‚¬â€ more open ports = wider exposure
     // 0-5 ports: 1.0x, 6-10: 1.15x, 11-20: 1.25x, 21+: 1.35x
     if ($open_ports_count <= 5)       $surface = 1.0;
     elseif ($open_ports_count <= 10)  $surface = 1.15;
     elseif ($open_ports_count <= 20)  $surface = 1.25;
     else                              $surface = 1.35;
 
-    // Step 4: Criticality cascade bonus — multiple criticals amplify each other
+    // Step 4: Criticality cascade bonus Ã¢â‚¬â€ multiple criticals amplify each other
     $crit_bonus = 0;
     if ($counts['Critical'] >= 3)     $crit_bonus = 15;
     elseif ($counts['Critical'] >= 1) $crit_bonus = 8;
@@ -205,12 +205,12 @@ function calculate_risk_score(array $findings, int $open_ports_count = 0): int {
     // Combine
     $raw = ($base + $cvss_bonus + $crit_bonus + $diversity) * $surface;
 
-    // Step 6: Normalise to 0–100 with a logarithmic curve so:
-    // — small vulns (~5 findings) score 20–40
-    // — medium (~20-30 findings) score 50–70
-    // — large (50+ findings) score 75–95
-    // — truly catastrophic (100+ criticals) score 95-100
-    // Raw scores typically land 10–400+; map to 0-100
+    // Step 6: Normalise to 0Ã¢â‚¬â€œ100 with a logarithmic curve so:
+    // Ã¢â‚¬â€ small vulns (~5 findings) score 20Ã¢â‚¬â€œ40
+    // Ã¢â‚¬â€ medium (~20-30 findings) score 50Ã¢â‚¬â€œ70
+    // Ã¢â‚¬â€ large (50+ findings) score 75Ã¢â‚¬â€œ95
+    // Ã¢â‚¬â€ truly catastrophic (100+ criticals) score 95-100
+    // Raw scores typically land 10Ã¢â‚¬â€œ400+; map to 0-100
     $normalised = round(100 * (1 - exp(-$raw / 120)));
 
     // Hard floor/ceiling
@@ -236,7 +236,7 @@ function query_nvd(string $keyword, int $limit = 30): array {
     $results = [];
     $seen    = [];
 
-    // Single keyword search (removed duplicate exactMatch call — saves 50% NVD time)
+    // Single keyword search (removed duplicate exactMatch call Ã¢â‚¬â€ saves 50% NVD time)
     $url1 = NVD_API_BASE . '?keywordSearch=' . urlencode($keyword) . '&resultsPerPage=' . $limit;
     $res1 = safe_curl($url1, $headers, null, 12);
 
@@ -265,7 +265,7 @@ function query_nvd(string $keyword, int $limit = 30): array {
                 $vector = $m['cvssData']['vectorString'] ?? '';
             }
 
-            // Description — prefer English
+            // Description Ã¢â‚¬â€ prefer English
             $desc = 'No description available.';
             foreach (($cve['descriptions'] ?? []) as $d) {
                 if ($d['lang'] === 'en') { $desc = $d['value']; break; }
@@ -335,11 +335,7 @@ function query_circl(string $keyword, int $limit = 20): array {
     return $results;
 }
 
-/* =========================================================
-   INTELLIGENCE SOURCE: OpenCVE v2
-   Docs: https://app.opencve.io/api/v2/
-   Auth: HTTP Basic (OPENCVE_USER / OPENCVE_PASS)
-   ========================================================= */
+
 function query_opencve(string $keyword, int $limit = 30): array {
     if (!OPENCVE_USER || !OPENCVE_PASS) return [];
     $keyword = trim($keyword);
@@ -367,7 +363,6 @@ function query_opencve(string $keyword, int $limit = 30): array {
 
     $results = [];
     $seen    = [];
-    // OpenCVE v2 returns {count, results: [{cve_id, description, ...}]}
     $items = $data['results'] ?? $data;
     if (!is_array($items)) return [];
 
@@ -376,7 +371,7 @@ function query_opencve(string $keyword, int $limit = 30): array {
         if (!$id || isset($seen[$id])) continue;
         $seen[$id] = true;
 
-        // OpenCVE v2 stores CVSS inside metrics
+        
         $score  = 0;
         $vector = '';
         $metrics = $item['metrics'] ?? [];
@@ -387,14 +382,12 @@ function query_opencve(string $keyword, int $limit = 30): array {
                 break;
             }
         }
-        // Fallback: some versions nest differently
         if ($score === 0 && isset($item['cvss'])) {
             $score = (float)$item['cvss'];
         }
 
         $desc = '';
         if (!empty($item['description'])) {
-            // Can be a string or array of {lang, value}
             if (is_string($item['description'])) {
                 $desc = $item['description'];
             } elseif (is_array($item['description'])) {
@@ -422,10 +415,7 @@ function query_opencve(string $keyword, int $limit = 30): array {
     return $results;
 }
 
-/**
- * Enrich a bare CVE ID with CVSS + summary from CIRCL
- * Used to fill in details for Shodan CVE IDs that have no metadata.
- */
+
 function enrich_cve_from_circl(string $cve_id): array {
     $url = CIRCL_API_BASE . 'cve/' . urlencode($cve_id);
     $res = safe_curl($url, [], null, 10);
@@ -444,11 +434,8 @@ function enrich_cve_from_circl(string $cve_id): array {
     ];
 }
 
-/* =========================================================
-   INTELLIGENCE SOURCE: Shodan
-   ========================================================= */
+
 function query_shodan(string $ip): array {
-    // Always return proper structure even if no key / API fails
     $empty = ['vulns' => [], 'ports' => [], 'intel' => null];
     if (!SHODAN_API_KEY) return $empty;
 
@@ -458,9 +445,7 @@ function query_shodan(string $ip): array {
     if (!$res || isset($res['error'])) return $empty;
 
     $vulns = [];
-    // Shodan reports CVE IDs in 'vulns' key — enrich each one via CIRCL
     foreach (array_keys($res['vulns'] ?? []) as $cve_id) {
-        // Shodan sometimes provides cvss inline
         $shodan_cvss = $res['vulns'][$cve_id]['cvss'] ?? 0;
 
         if ($shodan_cvss > 0) {
@@ -475,7 +460,6 @@ function query_shodan(string $ip): array {
                 'published'=> '',
             ];
         } else {
-            // Enrich via CIRCL to get real CVSS + summary
             $enriched = enrich_cve_from_circl($cve_id);
             if ($enriched) {
                 $vulns[] = $enriched;
@@ -494,7 +478,6 @@ function query_shodan(string $ip): array {
         }
     }
 
-    // Also extract open ports Shodan saw (supplement our scan)
     $shodan_ports = array_map('strval', $res['ports'] ?? []);
 
     return [
@@ -512,11 +495,8 @@ function query_shodan(string $ip): array {
     ];
 }
 
-/* =========================================================
-   INTELLIGENCE SOURCE: Censys v2
-   ========================================================= */
+
 function query_censys(string $ip): array {
-    // Censys is optional — never block scan if missing/failing
     if (!CENSYS_API_TOKEN) return ['error' => 'not_configured'];
 
     $url     = 'https://search.censys.io/api/v2/hosts/' . urlencode($ip);
@@ -532,10 +512,7 @@ function query_censys(string $ip): array {
     return $res;
 }
 
-/**
- * Extract additional port/service data from Censys v2 host response.
- * Returns array of [port, service, product, version] augmentation items.
- */
+
 function extract_censys_services(array $censys): array {
     $services = [];
     $result   = $censys['result'] ?? [];
@@ -556,9 +533,7 @@ function extract_censys_services(array $censys): array {
     return $services;
 }
 
-/* =========================================================
-   PORT SCANNER — Parallel PHP socket scan (async connect)
-   ========================================================= */
+
 function php_socket_scan(string $host, string $ip): string {
     $port_map = [
         21   => ['ftp',          'vsftpd'],
@@ -596,7 +571,6 @@ function php_socket_scan(string $host, string $ip): string {
         27017=> ['mongodb',      'MongoDB'],
     ];
 
-    // --- Phase 1: Open all connections in parallel (non-blocking) ---
     $sockets = [];
     foreach ($port_map as $port => $info) {
         $ctx = stream_context_create(['socket' => ['so_reuseaddr' => true]]);
@@ -612,15 +586,15 @@ function php_socket_scan(string $host, string $ip): string {
         }
     }
 
-    // --- Phase 2: Wait up to 1.5s for any sockets to become writable (= connected) ---
+    
     $open_ports = [];
     if (!empty($sockets)) {
         $read  = null;
         $write = array_values($sockets);
         $excpt = null;
-        $ready = @stream_select($read, $write, $excpt, 1, 500000); // 1.5s
+        $ready = @stream_select($read, $write, $excpt, 1, 500000);
         if ($ready) {
-            // Map writable sockets back to their ports
+            
             $port_by_sock = array_flip(array_map('intval', array_keys($sockets)));
             foreach ($write as $ws) {
                 foreach ($sockets as $port => $sock) {
@@ -630,7 +604,6 @@ function php_socket_scan(string $host, string $ip): string {
         }
     }
 
-    // --- Phase 3: Banner grab only open ports (with short timeout) ---
     $banner_ports = [21, 22, 25, 110, 143, 3306];
     $xml_ports = '';
     foreach ($port_map as $port => [$svcname, $product]) {
@@ -668,13 +641,8 @@ function php_socket_scan(string $host, string $ip): string {
         . "</nmaprun>";
 }
 
-/* =========================================================
-   PRIMARY SCAN ENGINE
-   ========================================================= */
-/**
- * Port number → [service_name, product, search_keywords[]] inference table.
- * Used when nmap reports "tcpwrapped" or no product/version data.
- */
+
+
 function port_to_products(int $port): array {
     $map = [
         21    => ['ftp',              'vsftpd',                     ['vsftpd', 'ProFTPD', 'FileZilla Server']],
@@ -732,22 +700,18 @@ function port_to_products(int $port): array {
 }
 
 function run_nmap(string $target): string {
-    // Try real nmap binary first (works after Dockerfile fix on Render)
     $bin = trim((string)shell_exec('which nmap 2>/dev/null || where nmap 2>NUL'));
     $bin = trim(explode("\n", $bin)[0]);
 
     if (!empty($bin) && @file_exists($bin)) {
         $safe = escapeshellarg($target);
-        // Fast recon: service version + specific fast vuln scripts instead of all default/vuln
         $out = shell_exec("{$bin} -sV --version-intensity 5 -T4 --max-retries 1 --host-timeout 15m -oX - {$safe} 2>&1");
         if ($out && strpos($out, '<nmaprun') !== false) return $out;
 
-        // Fallback: lighter scan if first times out
         $out2 = shell_exec("{$bin} -sV --version-intensity 3 -T4 -oX - {$safe} 2>&1");
         if ($out2 && strpos($out2, '<nmaprun') !== false) return $out2;
     }
 
-    // PHP socket fallback
     $ip = filter_var($target, FILTER_VALIDATE_IP)
         ? $target
         : @gethostbyname($target);
@@ -758,18 +722,14 @@ function run_nmap(string $target): string {
     return php_socket_scan($target, $ip);
 }
 
-/* =========================================================
-   TARGET VALIDATION
-   ========================================================= */
+
 function validate_target(string $target): array|false {
     $target = trim($target);
     if (empty($target)) return false;
 
-    // Strip scheme + path
     $host = preg_replace('#^https?://#', '', $target);
     $host = explode('/', $host)[0];
     
-    // Extract port if present (e.g. host:port)
     $port_specified = null;
     if (strpos($host, ':') !== false) {
         $parts = explode(':', $host);
@@ -792,14 +752,11 @@ function validate_target(string $target): array|false {
     return ['host' => $host, 'ip' => $ip];
 }
 
-/* =========================================================
-   API CONTROLLER
-   ========================================================= */
+
 if (isset($_GET['action'])) {
     header('Content-Type: application/json');
     header('X-Content-Type-Options: nosniff');
 
-    // Token auth
     $token = $_SERVER['HTTP_X_VULNSCOPE_TOKEN'] ?? '';
     if ($token !== SCAN_TOKEN) {
         http_response_code(401);
@@ -816,8 +773,7 @@ if (isset($_GET['action'])) {
             $host = $validation['host'];
             $ip   = $validation['ip'];
 
-            /* ---- Cache check: return cached result if < 30 minutes old ---- */
-            $cache_ttl = 1800; // 30 minutes
+            $cache_ttl = 1800;
             if ($db) {
                 try {
                     $cs = $db->prepare('SELECT response_json, cached_at FROM scan_cache WHERE ip_key = ?');
@@ -832,17 +788,15 @@ if (isset($_GET['action'])) {
                             exit;
                         }
                     }
-                } catch (Exception $e) { /* cache miss — proceed with full scan */ }
+                } catch (Exception $e) { /* cache miss Ã¢â‚¬â€ proceed with full scan */ }
             }
 
-            /* ---- 1. Port Scan ---- */
             $nmap_xml   = run_nmap($host);
             $xml        = @simplexml_load_string($nmap_xml);
-            $findings   = [];   // keyed by CVE ID for dedup
+            $findings   = [];
             $open_ports = [];
-            $nse_findings = []; // NSE vuln-script direct CVE hits
+            $nse_findings = [];
 
-            /* ---- Helper: merge a CVE hit into $findings ---- */
             $add_finding = function(array $hit, string $port_id, string $service_label) use (&$findings) {
                 $hit['affected_service'] = $hit['affected_service'] ?? $service_label;
                 $hit['port']             = $hit['port'] ?? $port_id;
@@ -850,12 +804,10 @@ if (isset($_GET['action'])) {
                 if (!isset($findings[$id])) {
                     $findings[$id] = $hit;
                 } else {
-                    // Merge source labels
                     $src = $hit['source'] ?? '';
                     if ($src && !str_contains($findings[$id]['source'] ?? '', $src)) {
                         $findings[$id]['source'] .= ' / ' . $src;
                     }
-                    // Upgrade CVSS if new source has a better score
                     if (($findings[$id]['cvss'] ?? 0) == 0 && ($hit['cvss'] ?? 0) > 0) {
                         $findings[$id]['cvss']     = $hit['cvss'];
                         $findings[$id]['severity'] = $hit['severity'];
@@ -863,12 +815,10 @@ if (isset($_GET['action'])) {
                 }
             };
 
-            /* ---- 2. Parse scan results & query CVEs per service (collect keywords first) ---- */
-            $all_kw_map = []; // keyword => [['port_id'=>.., 'service_label'=>..], ...]
+            $all_kw_map = [];
             if ($xml && isset($xml->host->ports->port)) {
                 foreach ($xml->host->ports->port as $p) {
                     $state = (string)($p->state['state'] ?? '');
-                    // Accept 'open' AND 'open|filtered' — both mean reachable
                     if ($state !== 'open' && $state !== 'open|filtered') continue;
 
                     $svc      = $p->service;
@@ -878,9 +828,6 @@ if (isset($_GET['action'])) {
                     $port_id  = (string)($p['portid']    ?? '');
                     $port_int = (int)$port_id;
 
-                    // --- TCPWrapped / unknown service fix ---
-                    // When nmap can't fingerprint the service it reports 'tcpwrapped'
-                    // or leaves product empty. Infer from well-known port numbers.
                     $inferred_products = [];
                     if (empty($product) || in_array(strtolower($svc_name), ['tcpwrapped', 'unknown', ''])) {
                         [$inf_svc, $inf_prod, $inf_keywords] = port_to_products($port_int);
@@ -898,7 +845,6 @@ if (isset($_GET['action'])) {
                         'version' => $version,
                     ];
 
-                    // Build search keyword list from detected + inferred products
                     $keywords = [];
                     if ($product && !in_array(strtolower($product), ['tcpwrapped', 'unknown'])) {
                         $norm = normalize_product($product);
@@ -907,7 +853,6 @@ if (isset($_GET['action'])) {
                             if ($version) $keywords[] = $norm . ' ' . $version;
                         }
                     }
-                    // Add inferred keywords (well-known product names for this port)
                     foreach ($inferred_products as $kw) {
                         $normalized = normalize_product($kw);
                         if ($normalized) $keywords[] = $normalized;
@@ -919,35 +864,26 @@ if (isset($_GET['action'])) {
                     $keywords = array_unique(array_filter($keywords));
                     $service_label = trim("$product $version") ?: "Port $port_id";
 
-                    // Limit keyword sprawl for inferred/tcpwrapped ports
                     $was_inferred = !empty($inferred_products);
                     if ($was_inferred) {
-                        // For tcpwrapped ports: only use the 1 most specific keyword
                         $keywords = array_slice($keywords, 0, 1);
                     } else {
-                        // For identified products: cap at 3 keywords max
                         $keywords = array_slice($keywords, 0, 3);
                     }
 
-                    // Accumulate keywords for batch processing (dedup across all ports)
                     foreach ($keywords as $kw) {
                         if (strlen(trim($kw)) >= 2) {
                             $all_kw_map[$kw][] = ['port_id' => $port_id, 'service_label' => $service_label];
                         }
                     }
-
-                    // --- NSE vuln script output → direct CVE findings ---
-                    // Nmap --script vuln outputs CVE IDs in script output XML
                     foreach ($p->script as $script) {
                         $script_id  = strtolower((string)($script['id'] ?? ''));
                         $script_out = trim((string)($script['output'] ?? ''));
 
-                        // Extract CVE IDs from NSE output text
                         if (preg_match_all('/CVE-\d{4}-\d+/i', $script_out, $cve_matches)) {
                             foreach ($cve_matches[0] as $cve_id) {
                                 $cve_id = strtoupper($cve_id);
                                 if (isset($findings[$cve_id])) continue;
-                                // Enrich via CIRCL first (fast), NVD as backup
                                 $enriched = enrich_cve_from_circl($cve_id);
                                 if (!$enriched) {
                                     $enriched = [
@@ -967,7 +903,6 @@ if (isset($_GET['action'])) {
                             }
                         }
 
-                        // Also capture high-value NSE non-CVE findings (e.g. ms17-010, heartbleed)
                         $known_critical = [
                             'smb-vuln-ms17-010'  => ['MS17-010 (EternalBlue)', 9.8],
                             'smb-vuln-ms08-067'  => ['MS08-067 Netapi RCE',   10.0],
@@ -986,7 +921,7 @@ if (isset($_GET['action'])) {
                                     'id'              => $fake_id,
                                     'cvss'            => $cvss_score,
                                     'severity'        => classify_severity($cvss_score),
-                                    'summary'         => $vuln_name . ' — ' . substr($script_out, 0, 200),
+                                    'summary'         => $vuln_name . ' Ã¢â‚¬â€ ' . substr($script_out, 0, 200),
                                     'source'          => 'Nmap NSE',
                                     'vector'          => '',
                                     'cwe'             => '',
@@ -1000,15 +935,13 @@ if (isset($_GET['action'])) {
                 }
             }
 
-            /* ---- 2b. Batch parallel CVE queries for all collected keywords ---- */
             if (!empty($all_kw_map)) {
                 $unique_kws = array_keys($all_kw_map);
                 $requests   = [];
-                $req_meta   = []; // maps request index -> [source, keyword]
+                $req_meta   = [];
 
                 foreach ($unique_kws as $kw) {
                     $kw_enc = urlencode($kw);
-                    // NVD request
                     if (NVD_API_KEY) {
                         $req_meta[] = ['source' => 'nvd', 'kw' => $kw];
                         $requests[] = [
@@ -1017,7 +950,6 @@ if (isset($_GET['action'])) {
                             'timeout' => 12,
                         ];
                     }
-                    // CIRCL request
                     $req_meta[] = ['source' => 'circl', 'kw' => $kw];
                     $requests[] = [
                         'url'     => CIRCL_API_BASE . 'search/' . $kw_enc,
@@ -1036,10 +968,8 @@ if (isset($_GET['action'])) {
                     }
                 }
 
-                // Fire ALL API calls in parallel
                 $responses = safe_curl_multi($requests);
 
-                // Process each response
                 foreach ($responses as $i => $data) {
                     if (!$data || !is_array($data)) continue;
                     $meta = $req_meta[$i];
@@ -1048,7 +978,6 @@ if (isset($_GET['action'])) {
 
                     $hits = [];
                     if ($src === 'nvd') {
-                        // Parse NVD response
                         foreach ($data['vulnerabilities'] ?? [] as $v) {
                             $cve   = $v['cve'] ?? [];
                             $id    = $cve['id'] ?? '';
@@ -1078,7 +1007,6 @@ if (isset($_GET['action'])) {
                             ];
                         }
                     } elseif ($src === 'circl') {
-                        // Parse CIRCL response
                         $items = isset($data[0]) ? $data : ($data['results'] ?? []);
                         foreach (array_slice($items, 0, 15) as $cve) {
                             $id = $cve['id'] ?? ($cve['cve_id'] ?? '');
@@ -1094,7 +1022,6 @@ if (isset($_GET['action'])) {
                             ];
                         }
                     } elseif ($src === 'opencve') {
-                        // Parse OpenCVE response
                         $items = $data['results'] ?? $data;
                         if (!is_array($items)) continue;
                         foreach (array_slice($items, 0, 20) as $item) {
@@ -1130,7 +1057,6 @@ if (isset($_GET['action'])) {
                         }
                     }
 
-                    // Associate hits with their ports
                     foreach ($hits as $hit) {
                         foreach ($all_kw_map[$kw] as $ctx) {
                             $add_finding($hit, $ctx['port_id'], $ctx['service_label']);
@@ -1139,7 +1065,6 @@ if (isset($_GET['action'])) {
                 }
             }
 
-            /* ---- 3. Shodan IP Intelligence (enriches each CVE via CIRCL) ---- */
             $shodan_data = query_shodan($ip);
             foreach ($shodan_data['vulns'] as $hit) {
                 if (!isset($findings[$hit['id']])) {
@@ -1149,7 +1074,6 @@ if (isset($_GET['action'])) {
                 } else {
                     if (!str_contains($findings[$hit['id']]['source'], 'Shodan'))
                         $findings[$hit['id']]['source'] .= ' / Shodan';
-                    // Shodan enrichment may have better CVSS
                     if ($findings[$hit['id']]['cvss'] == 0 && $hit['cvss'] > 0) {
                         $findings[$hit['id']]['cvss']     = $hit['cvss'];
                         $findings[$hit['id']]['severity'] = $hit['severity'];
@@ -1170,16 +1094,13 @@ if (isset($_GET['action'])) {
                 }
             }
 
-            /* ---- 4. Censys v2 host intelligence (optional, non-blocking) ---- */
             $censys_data = query_censys($ip);
             if ($censys_data && !isset($censys_data['error'])) {
-                // Extract additional services Censys found and query CVEs for them
                 foreach (extract_censys_services($censys_data) as $csvc) {
                     $port_id = $csvc['port'];
                     $product = $csvc['product'];
                     $version = $csvc['version'];
 
-                    // Add to open_ports if not already there
                     $found = false;
                     foreach ($open_ports as &$op) {
                         if ($op['port'] === $port_id) {
@@ -1210,10 +1131,8 @@ if (isset($_GET['action'])) {
                 }
             }
 
-            /* ---- 5. Post-processing & scoring ---- */
             $findings = array_values($findings);
 
-            // Sort: Critical > High > Medium > Low > Info, then by CVSS desc
             usort($findings, function ($a, $b) {
                 $order = ['Critical' => 5, 'High' => 4, 'Medium' => 3, 'Low' => 2, 'Info' => 1, 'Unknown' => 0];
                 $sa = $order[$a['severity']] ?? 0;
@@ -1221,8 +1140,6 @@ if (isset($_GET['action'])) {
                 if ($sa !== $sb) return $sb - $sa;
                 return $b['cvss'] <=> $a['cvss'];
             });
-
-            // Severity distribution (use lowercase keys for JS compatibility)
             $dist = ['critical' => 0, 'high' => 0, 'medium' => 0, 'low' => 0, 'info' => 0];
             foreach ($findings as $f) {
                 $l = strtolower($f['severity'] ?? 'info');
@@ -1230,10 +1147,8 @@ if (isset($_GET['action'])) {
                 $dist[$l]++;
             }
 
-            // Dynamic risk score
             $risk_score = calculate_risk_score($findings, count($open_ports));
 
-            /* ---- 6. Build response ---- */
             $response = [
                 'success'              => true,
                 'findings'             => $findings,
@@ -1442,214 +1357,135 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
 .fb.fc.active{background:var(--danger-dim);border-color:var(--danger-border);color:var(--danger)}
 .fb.fh.active{background:var(--warn-dim);border-color:rgba(249,115,22,.3);color:var(--warn)}
 .fb.fm.active{background:var(--med-dim);border-color:rgba(234,179,8,.3);color:var(--med)}
-#vulnList{max-height:560px;overflow-y:auto;display:flex;flex-direction:column;gap:9px;padding:16px 18px}
-.vc{
-  border-radius:var(--r12);padding:0;
-  border:1px solid var(--border);
-  background:rgba(255,255,255,.016);
-  transition:border-color .18s ease,background .18s ease;
-  animation:cin .25s ease both;
-  position:relative;overflow:hidden;cursor:pointer;
-}
-.vc::before{
-  content:"";position:absolute;left:0;top:0;bottom:0;width:3px;
-  transition:opacity .2s;
-}
-/* severity tints ------------------------------------------- */
-.vc.severity-Critical::before{background:var(--danger)}
-.vc.severity-Critical{border-color:var(--danger-border);background:var(--danger-dim)}
-.vc.severity-High::before{background:var(--warn)}
-.vc.severity-High{border-color:rgba(249,115,22,.2);background:var(--warn-dim)}
-.vc.severity-Medium::before{background:var(--med)}
-.vc.severity-Medium{border-color:rgba(234,179,8,.2);background:var(--med-dim)}
-.vc.severity-Low::before{background:var(--low)}
-.vc.severity-Low{border-color:rgba(34,211,238,.15);background:var(--low-dim)}
+/* ============================================================
+   SEARCH / SORT TOOLBAR
+   ============================================================ */
+.sif-toolbar{display:flex;align-items:center;gap:8px;padding:0 18px 12px;flex-wrap:wrap}
+.sif-search-wrap{position:relative;flex:1;min-width:180px}
+.sif-search{width:100%;background:rgba(4,8,18,.8);border:1px solid var(--border2);border-radius:var(--r8);padding:7px 10px 7px 30px;font-family:var(--mono);font-size:11px;color:var(--t1);outline:none;transition:var(--ease)}
+.sif-search::placeholder{color:var(--t4)}
+.sif-search:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(6,182,212,.06)}
+.sif-search-ico{position:absolute;left:10px;top:50%;transform:translateY(-50%);font-size:10px;color:var(--t3);pointer-events:none}
+.sif-sort{background:rgba(4,8,18,.8);border:1px solid var(--border2);border-radius:var(--r8);padding:7px 10px;font-family:var(--mono);font-size:10px;color:var(--t2);cursor:pointer;transition:var(--ease);-webkit-appearance:none;appearance:none;min-width:130px;outline:none}
+.sif-sort:focus{border-color:var(--accent)}
+.sif-sort option{background:#0a121e;color:var(--t1)}
+.sif-count{font-size:9px;font-family:var(--mono);color:var(--t4);white-space:nowrap;letter-spacing:.06em}
+/* ============================================================
+   VULN LIST CONTAINER
+   ============================================================ */
+#vulnList{max-height:680px;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding:16px 18px}
+/* ============================================================
+   UNIFIED VULNERABILITY CARD v2.0
+   Every severity tab renders this identical component.
+   Description always visible. Expand = advanced details only.
+   ============================================================ */
+.vc{border-radius:var(--r12);padding:0;border:1px solid var(--border);background:rgba(255,255,255,.016);transition:border-color .18s ease,background .18s ease;animation:cin .25s ease both;position:relative;overflow:hidden}
+.vc::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;transition:opacity .2s}
+.vc.severity-Critical::before{background:var(--danger)}.vc.severity-Critical{border-color:var(--danger-border);background:var(--danger-dim)}
+.vc.severity-High::before{background:var(--warn)}.vc.severity-High{border-color:rgba(249,115,22,.2);background:var(--warn-dim)}
+.vc.severity-Medium::before{background:var(--med)}.vc.severity-Medium{border-color:rgba(234,179,8,.2);background:var(--med-dim)}
+.vc.severity-Low::before{background:var(--low)}.vc.severity-Low{border-color:rgba(34,211,238,.15);background:var(--low-dim)}
 .vc.severity-Info::before,.vc.severity-Unknown::before{background:var(--info)}
 .vc.severity-Info,.vc.severity-Unknown{border-color:var(--border);background:var(--info-dim)}
 .vc:hover{border-color:rgba(255,255,255,.12)}
 .vc.expanded{box-shadow:0 4px 24px rgba(0,0,0,.25)}
 @keyframes cin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
-
-/* --- COLLAPSED HEADER (always visible) -------------------- */
-/* Fixed height guarantees every row is exactly the same size */
-.vc-hdr{
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap:12px;
-  height:46px;          /* locked — same for ALL severity levels */
-  padding:0 14px 0 16px;
-  box-sizing:border-box;
-  user-select:none;
-}
-/* left group: CVE ID + source badge */
-.vc-ids{
-  display:flex;
-  align-items:center;   /* perfectly centres every child on the same axis */
-  gap:8px;
-  flex:1;
-  min-width:0;
-  overflow:hidden;
-}
-/* CVE ID text */
-.vc-id{
-  font-family:var(--mono);
-  font-size:12.5px;
-  font-weight:700;
-  color:var(--accent);
-  line-height:1;        /* collapse extra leading so baseline is predictable */
-  white-space:nowrap;
-  display:flex;
-  align-items:center;
-}
-.vc-id a{color:inherit;text-decoration:none;pointer-events:auto;display:inline-flex;align-items:center}
+/* --- Header row ------------------------------------------ */
+.vc-hdr{display:flex;align-items:center;gap:8px;padding:12px 14px 0 16px;flex-wrap:wrap}
+.vc-ids{display:flex;align-items:center;gap:8px;flex:1;min-width:0}
+.vc-id{font-family:var(--mono);font-size:12.5px;font-weight:700;color:var(--accent);line-height:1;white-space:nowrap;display:flex;align-items:center}
+.vc-id a{color:inherit;text-decoration:none;display:inline-flex;align-items:center}
 .vc-id a:hover{text-decoration:underline}
-/* NVD / Shodan / CIRCL source badge */
-.src-badge{
-  display:inline-flex;
-  align-items:center;
-  height:18px;          /* fixed height → same vertical footprint as chips */
-  padding:0 6px;
-  border-radius:3px;
-  font-size:7.5px;
-  font-weight:700;
-  font-family:var(--mono);
-  letter-spacing:.09em;
-  text-transform:uppercase;
-  background:rgba(255,255,255,.04);
-  color:var(--t3);
-  border:1px solid var(--border2);
-  flex-shrink:0;
-  box-sizing:border-box;
-  line-height:1;
-}
-/* right group: severity + CVSS + caret */
-.sev-tags{
-  display:flex;
-  align-items:center;   /* baseline-aligned group */
-  gap:6px;
-  flex-shrink:0;
-}
-/* severity badge (Critical / High / Medium / Low / Info) */
-.sp{
-  display:inline-flex;
-  align-items:center;
-  height:20px;          /* unified height — all severity badges identical */
-  padding:0 8px;
-  border-radius:5px;
-  font-size:9px;
-  font-weight:700;
-  font-family:var(--mono);
-  letter-spacing:.07em;
-  text-transform:uppercase;
-  line-height:1;
-  box-sizing:border-box;
-  white-space:nowrap;
-}
+.src-badge{display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:3px;font-size:7.5px;font-weight:700;font-family:var(--mono);letter-spacing:.09em;text-transform:uppercase;background:rgba(255,255,255,.04);color:var(--t3);border:1px solid var(--border2);flex-shrink:0;box-sizing:border-box;line-height:1}
+.sev-tags{display:flex;align-items:center;gap:6px;flex-shrink:0}
+.sp{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:5px;font-size:9px;font-weight:700;font-family:var(--mono);letter-spacing:.07em;text-transform:uppercase;line-height:1;box-sizing:border-box;white-space:nowrap}
 .sp.Critical{background:rgba(239,68,68,.14);color:var(--danger);border:1px solid var(--danger-border)}
 .sp.High{background:rgba(249,115,22,.12);color:var(--warn);border:1px solid rgba(249,115,22,.25)}
 .sp.Medium{background:rgba(234,179,8,.12);color:var(--med);border:1px solid rgba(234,179,8,.25)}
 .sp.Low{background:rgba(34,211,238,.08);color:var(--low);border:1px solid rgba(34,211,238,.2)}
 .sp.Info,.sp.Unknown{background:rgba(100,116,139,.09);color:var(--info);border:1px solid var(--border)}
-/* CVSS score chip */
-.cvss-chip{
-  display:inline-flex;
-  align-items:center;
-  height:20px;          /* same as .sp — locked to identical height */
-  padding:0 8px;
-  border-radius:4px;
-  font-size:9px;
-  font-weight:700;
-  font-family:var(--mono);
-  color:#e2e8f0;
-  background:rgba(255,255,255,.07);
-  border:1px solid rgba(255,255,255,.14);
-  line-height:1;
-  box-sizing:border-box;
-  white-space:nowrap;
-}
-/* expand/collapse chevron */
-.vc-caret{
-  font-size:9px;
-  color:var(--t4);
-  transition:transform .22s ease;
-  flex-shrink:0;
-  display:flex;
-  align-items:center;
-  width:16px;height:16px;justify-content:center;
-}
-.vc.expanded .vc-caret{transform:rotate(180deg)}
-
-/* --- EXPANDABLE BODY ------------------------------------- */
-.vc-body{
-  max-height:0;
-  overflow:hidden;
-  transition:max-height .28s cubic-bezier(.4,0,.2,1);
-}
-.vc.expanded .vc-body{max-height:600px}
-.vc-body-inner{
-  padding:0 16px 14px;
-  border-top:1px solid rgba(255,255,255,.05);
-}
-/* service line inside body */
-.vc-svc{
-  display:flex;
-  align-items:center;
-  gap:6px;
-  font-size:10.5px;
-  font-weight:500;
-  font-family:var(--mono);
-  color:var(--accent);
-  padding:10px 0 8px;
-  border-bottom:1px solid rgba(255,255,255,.04);
-  margin-bottom:10px;
-  line-height:1;
-}
-.vc-svc i{font-size:10px;opacity:.7}
-/* description paragraph */
-.vc-sum{
-  font-size:11.5px;
-  color:var(--t2);
-  line-height:1.65;
-  margin-bottom:12px;
-  word-break:break-word;
-}
-/* bottom chips row */
-.vc-meta{
-  display:flex;
-  align-items:center;
-  gap:6px;
-  flex-wrap:wrap;
-}
-.vec-chip{
-  display:inline-flex;align-items:center;
-  height:18px;padding:0 5px;
-  font-size:8px;font-family:var(--mono);color:var(--t4);
-  background:rgba(255,255,255,.02);border:1px solid var(--border);
-  border-radius:3px;max-width:150px;overflow:hidden;
-  text-overflow:ellipsis;white-space:nowrap;box-sizing:border-box;line-height:1;
-}
-.port-chip{
-  display:inline-flex;align-items:center;
-  height:18px;padding:0 7px;
-  font-size:9px;font-weight:700;font-family:var(--mono);color:var(--t3);
-  background:rgba(255,255,255,.04);border:1px solid var(--border);
-  border-radius:4px;box-sizing:border-box;line-height:1;
-}
-.cwe-chip{
-  display:inline-flex;align-items:center;
-  height:18px;padding:0 6px;
-  font-size:8px;font-family:var(--mono);color:var(--warn);
-  background:rgba(249,115,22,.06);border:1px solid rgba(249,115,22,.18);
-  border-radius:4px;box-sizing:border-box;line-height:1;
-}
-.date-chip{
-  display:inline-flex;align-items:center;
-  height:18px;
-  font-size:8px;font-family:var(--mono);color:var(--t4);line-height:1;
-}
+.cvss-chip{display:inline-flex;align-items:center;height:20px;padding:0 8px;border-radius:4px;font-size:9px;font-weight:700;font-family:var(--mono);color:#e2e8f0;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);line-height:1;box-sizing:border-box;white-space:nowrap}
+/* --- ALWAYS VISIBLE: product + description + metadata ---- */
+.vc-visible{padding:8px 16px 12px}
+.vc-prod-line{display:flex;align-items:center;gap:8px;margin-bottom:6px;flex-wrap:wrap}
+.vc-prod-name{font-size:10.5px;font-weight:600;font-family:var(--mono);color:var(--accent);display:flex;align-items:center;gap:5px}
+.vc-prod-name i{font-size:9px;opacity:.7}
+.vc-prod-detail{font-size:9px;font-family:var(--mono);color:var(--t3)}
+.vc-desc{font-size:11px;color:var(--t2);line-height:1.65;margin-bottom:10px;word-break:break-word;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical;overflow:hidden;position:relative}
+.vc-desc.vc-desc-full{-webkit-line-clamp:unset;overflow:visible}
+.vc-chips{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-bottom:8px}
+.vc-chip{display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:3px;font-size:7.5px;font-weight:700;font-family:var(--mono);letter-spacing:.05em;text-transform:uppercase;background:rgba(255,255,255,.03);border:1px solid var(--border);color:var(--t3);box-sizing:border-box;line-height:1;white-space:nowrap}
+.vc-chip.chip-av{color:var(--accent);border-color:var(--accent-border);background:rgba(6,182,212,.06)}
+.vc-chip.chip-sev{color:var(--danger);border-color:var(--danger-border);background:var(--danger-dim)}
+.vc-bottom{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.port-chip{display:inline-flex;align-items:center;height:18px;padding:0 7px;font-size:9px;font-weight:700;font-family:var(--mono);color:var(--t3);background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:4px;box-sizing:border-box;line-height:1}
+.cwe-chip{display:inline-flex;align-items:center;height:18px;padding:0 6px;font-size:8px;font-family:var(--mono);color:var(--warn);background:rgba(249,115,22,.06);border:1px solid rgba(249,115,22,.18);border-radius:4px;box-sizing:border-box;line-height:1}
+.date-chip{display:inline-flex;align-items:center;height:18px;font-size:8px;font-family:var(--mono);color:var(--t4);line-height:1}
+.vec-chip{display:inline-flex;align-items:center;height:18px;padding:0 5px;font-size:8px;font-family:var(--mono);color:var(--t4);background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:3px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;box-sizing:border-box;line-height:1}
+.na-chip{display:inline-flex;align-items:center;height:18px;padding:0 6px;font-size:8px;font-family:var(--mono);color:var(--t4);background:transparent;border:1px solid var(--border);border-radius:3px;opacity:.5;line-height:1}
+/* --- Expand toggle --------------------------------------- */
+.vc-expand-btn{display:flex;align-items:center;justify-content:center;gap:5px;padding:6px 16px;border-top:1px solid rgba(255,255,255,.04);font-size:8px;font-family:var(--mono);font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--t4);cursor:pointer;user-select:none;transition:var(--ease)}
+.vc-expand-btn:hover{color:var(--accent);background:rgba(6,182,212,.03)}
+.vc-expand-btn i{font-size:8px;transition:transform .22s ease}
+.vc.expanded .vc-expand-btn i{transform:rotate(180deg)}
+/* --- Expandable advanced section ------------------------- */
+.vc-adv{max-height:0;overflow:hidden;transition:max-height .3s cubic-bezier(.4,0,.2,1)}
+.vc.expanded .vc-adv{max-height:800px}
+.vc-adv-inner{padding:10px 16px 14px;border-top:1px solid rgba(255,255,255,.05)}
+.vc-adv-title{font-size:8px;font-weight:700;font-family:var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--t4);margin-bottom:8px}
+.vc-adv-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px}
+.vc-adv-item{font-size:9px;color:var(--t3);font-family:var(--mono)}
+.vc-adv-item strong{color:var(--t2);display:block;font-size:8px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:2px}
+.vc-adv-desc{font-size:10.5px;color:var(--t2);line-height:1.6;word-break:break-word;margin-bottom:10px}
+.vc-adv-link{display:inline-flex;align-items:center;gap:4px;font-size:9px;font-family:var(--mono);color:var(--accent);text-decoration:none;padding:3px 8px;border:1px solid var(--accent-border);border-radius:4px;transition:var(--ease)}
+.vc-adv-link:hover{background:var(--accent-glow)}
+/* ============================================================
+   ATTACK PROBABILITY ANALYSIS PANEL
+   ============================================================ */
+.attack-prob-panel{margin-top:16px}
+.ap-disclaimer{font-size:9px;color:var(--t4);font-family:var(--mono);line-height:1.55;padding:10px 18px;border-bottom:1px solid var(--border);font-style:italic}
+.ap-body{padding:18px;display:flex;flex-direction:column;gap:18px}
+.ap-summary{font-size:11px;color:var(--t2);line-height:1.65;padding:12px 14px;background:rgba(6,182,212,.04);border:1px solid var(--accent-border);border-radius:var(--r8);word-break:break-word}
+.ap-summary strong{color:var(--accent)}
+.ap-bars{display:flex;flex-direction:column;gap:8px}
+.ap-bar-row{display:flex;align-items:center;gap:10px}
+.ap-bar-label{font-size:9px;font-family:var(--mono);color:var(--t2);width:150px;flex-shrink:0;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ap-bar-track{flex:1;height:8px;background:rgba(255,255,255,.04);border-radius:99px;overflow:hidden;min-width:60px}
+.ap-bar-fill{height:100%;border-radius:99px;transition:width .8s cubic-bezier(.4,0,.2,1);min-width:0}
+.ap-bar-fill.ap-critical{background:linear-gradient(90deg,#dc2626,var(--danger))}
+.ap-bar-fill.ap-vhigh{background:linear-gradient(90deg,#ea580c,var(--warn))}
+.ap-bar-fill.ap-high{background:linear-gradient(90deg,#ca8a04,var(--med))}
+.ap-bar-fill.ap-medium{background:linear-gradient(90deg,var(--accent),var(--accent2))}
+.ap-bar-fill.ap-low{background:linear-gradient(90deg,#0891b2,var(--low))}
+.ap-bar-fill.ap-minimal{background:#475569}
+.ap-bar-pct{font-size:10px;font-weight:700;font-family:var(--mono);color:var(--t1);width:38px;text-align:right;flex-shrink:0}
+.ap-bar-class{font-size:7px;font-family:var(--mono);font-weight:700;letter-spacing:.08em;text-transform:uppercase;width:60px;text-align:right;flex-shrink:0}
+.ap-bar-class.cls-critical{color:var(--danger)}.ap-bar-class.cls-vhigh{color:var(--warn)}.ap-bar-class.cls-high{color:var(--med)}.ap-bar-class.cls-medium{color:var(--accent)}.ap-bar-class.cls-low{color:var(--low)}.ap-bar-class.cls-minimal{color:var(--info)}
+.ap-charts{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:4px}
+.ap-chart-wrap{background:rgba(255,255,255,.015);border:1px solid var(--border);border-radius:var(--r12);padding:14px;text-align:center}
+.ap-chart-title{font-size:8px;font-weight:700;font-family:var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--t4);margin-bottom:10px}
+.ap-chart-svg{max-width:220px;margin:0 auto;display:block}
+.ap-legend{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-top:8px}
+.ap-legend-item{display:flex;align-items:center;gap:4px;font-size:8px;font-family:var(--mono);color:var(--t3)}
+.ap-legend-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+/* ============================================================
+   SKELETON / SHIMMER LOADERS
+   ============================================================ */
+@keyframes shimmer{0%{background-position:-200px 0}100%{background-position:200px 0}}
+.skel-card{border-radius:var(--r12);border:1px solid var(--border);padding:14px 16px;margin-bottom:10px;animation:cin .25s ease both}
+.skel-line{height:10px;border-radius:4px;background:linear-gradient(90deg,rgba(255,255,255,.03) 25%,rgba(255,255,255,.06) 50%,rgba(255,255,255,.03) 75%);background-size:400px 100%;animation:shimmer 1.4s infinite linear;margin-bottom:8px}
+.skel-line.w70{width:70%}.skel-line.w50{width:50%}.skel-line.w90{width:90%}.skel-line.w40{width:40%}
+.skel-chips{display:flex;gap:6px;margin-top:4px}
+.skel-chip{width:50px;height:18px;border-radius:4px;background:linear-gradient(90deg,rgba(255,255,255,.03) 25%,rgba(255,255,255,.06) 50%,rgba(255,255,255,.03) 75%);background-size:400px 100%;animation:shimmer 1.4s infinite linear}
+/* ============================================================
+   EMPTY STATE (enhanced)
+   ============================================================ */
 .empty-s{padding:40px 20px;text-align:center;color:var(--t4);font-family:var(--mono);font-size:12px;display:flex;flex-direction:column;align-items:center;gap:10px}
 .empty-s i{font-size:26px}
+.empty-s .empty-hint{font-size:10px;color:var(--t4);opacity:.6;margin-top:2px}
+/* ============================================================
+   PORT GRID + SVC CARDS + ERROR TOAST (preserved)
+   ============================================================ */
 #portGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px;max-height:420px;overflow-y:auto;padding:16px 18px}
 .svc-card{background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:var(--r12);padding:14px;display:flex;align-items:flex-start;gap:10px;transition:var(--ease);animation:cin .25s ease both}
 .svc-card:hover{transform:translateY(-2px);border-color:var(--accent-border);background:var(--accent-glow);box-shadow:0 6px 20px rgba(6,182,212,.07)}
@@ -1669,9 +1505,12 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
 .t-close:hover{color:var(--t1)}
 #sb-ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:199;backdrop-filter:blur(2px)}
 #sb-ov.on{display:block}
-@media(max-width:1024px){:root{--sidebar:0px}#sb{transform:translateX(-260px);width:260px}#sb.open{transform:translateX(0)}#main{margin-left:0}#sbtoggle{display:flex;align-items:center}.res-body{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}}
-@media(max-width:768px){#pg{padding:14px}.scan-panel{padding:20px 18px}.scan-ph h1{font-size:16px}.scan-row{flex-direction:column}#btn{width:100%;justify-content:center}.stats{grid-template-columns:repeat(2,1fr);gap:10px}.sc-val{font-size:28px}#portGrid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}.tb-pill:last-child{display:none}.res-hdr{flex-direction:column;align-items:flex-start}}
-@media(max-width:480px){:root{--topbar:54px}#pg{padding:10px}.scan-panel{padding:16px 14px;border-radius:var(--r16)}.eng-badge{display:none}.stats{grid-template-columns:1fr 1fr;gap:8px}.sc{padding:14px 16px}.sc-val{font-size:24px}.sc.ip .sc-val{font-size:12px}#vulnList{padding:10px 12px}#portGrid{grid-template-columns:1fr 1fr;padding:10px 12px}.panel-hdr{padding:12px 14px}.panel-body{padding:14px}.vc{padding:12px 13px}}
+/* ============================================================
+   RESPONSIVE BREAKPOINTS (v2.0)
+   ============================================================ */
+@media(max-width:1024px){:root{--sidebar:0px}#sb{transform:translateX(-260px);width:260px}#sb.open{transform:translateX(0)}#main{margin-left:0}#sbtoggle{display:flex;align-items:center}.res-body{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}.ap-charts{grid-template-columns:1fr}.ap-bar-label{width:120px}}
+@media(max-width:768px){#pg{padding:14px}.scan-panel{padding:20px 18px}.scan-ph h1{font-size:16px}.scan-row{flex-direction:column}#btn{width:100%;justify-content:center}.stats{grid-template-columns:repeat(2,1fr);gap:10px}.sc-val{font-size:28px}#portGrid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}.tb-pill:last-child{display:none}.res-hdr{flex-direction:column;align-items:flex-start}.sif-toolbar{flex-direction:column}.sif-search-wrap{min-width:100%}.vc-hdr{flex-wrap:wrap;gap:6px}.vc-chips{gap:4px}.ap-bar-label{width:90px;font-size:8px}.ap-charts{grid-template-columns:1fr}}
+@media(max-width:480px){:root{--topbar:54px}#pg{padding:10px}.scan-panel{padding:16px 14px;border-radius:var(--r16)}.eng-badge{display:none}.stats{grid-template-columns:1fr 1fr;gap:8px}.sc{padding:14px 16px}.sc-val{font-size:24px}.sc.ip .sc-val{font-size:12px}#vulnList{padding:10px 12px;max-height:none}#portGrid{grid-template-columns:1fr 1fr;padding:10px 12px}.panel-hdr{padding:12px 14px}.panel-body{padding:14px}.vc-visible{padding:6px 12px 10px}.ap-bar-row{flex-wrap:wrap;gap:4px}.ap-bar-label{width:100%;font-size:9px}.ap-bar-class{display:none}}
 @media(max-width:360px){.stats{grid-template-columns:1fr}#portGrid{grid-template-columns:1fr}}
 </style>
 </head>
@@ -1810,8 +1649,36 @@ foreach ($_alist as $_ak => $_al):
               <button class="fb" onclick="fvulns('Low',this)">Low</button>
             </div>
           </div>
+          <!-- Search / Sort Toolbar -->
+          <div class="sif-toolbar" id="sifToolbar">
+            <div class="sif-search-wrap">
+              <i class="fas fa-search sif-search-ico"></i>
+              <input type="text" class="sif-search" id="sifSearch" placeholder="Search CVE, CWE, description, service..." autocomplete="off" spellcheck="false" aria-label="Search findings">
+            </div>
+            <select class="sif-sort" id="sifSort" aria-label="Sort findings">
+              <option value="severity">Sort: Severity</option>
+              <option value="cvss-desc">Sort: CVSS â†“</option>
+              <option value="cvss-asc">Sort: CVSS â†‘</option>
+              <option value="cve-desc">Sort: CVE ID â†“</option>
+              <option value="cve-asc">Sort: CVE ID â†‘</option>
+            </select>
+            <span class="sif-count" id="sifCount"></span>
+          </div>
           <div id="vulnList"></div>
         </div>
+        <!-- Attack Probability Analysis Panel -->
+        <div class="panel attack-prob-panel" id="attackProbPanel" style="display:none">
+          <div class="panel-hdr">
+            <div class="panel-title"><i class="fas fa-radar"></i>Attack Probability Analysis</div>
+          </div>
+          <div class="ap-disclaimer">Attack probabilities are heuristic estimates based on CVSS, CWE, attack vector and vulnerability metadata. They should be used for prioritisation and triage, not as predictions of future attacks.</div>
+          <div class="ap-body">
+            <div class="ap-summary" id="apSummary"></div>
+            <div class="ap-bars" id="apBars"></div>
+            <div class="ap-charts" id="apCharts"></div>
+          </div>
+        </div>
+
       </div>
       <div class="panel" id="infra-section" style="margin-bottom:0">
         <div class="panel-hdr">
@@ -1888,14 +1755,19 @@ function renderDashboard(resp){
   document.getElementById('resTarget').innerText='HOST: '+s.target;
   document.getElementById('resIp').innerText=s.ip;
   const[rl,rc]=riskMeta(s.risk_score);
-  document.getElementById('riskLabel').innerText=rl+' — Score: '+s.risk_score+'/100';
+  document.getElementById('riskLabel').innerText=rl+' Ã¢â‚¬â€ Score: '+s.risk_score+'/100';
   const rb=document.getElementById('riskBadge');rb.className='risk-badge '+rc;rb.innerHTML='<i class="fas fa-triangle-exclamation"></i> '+rl;rb.style.display='inline-flex';
   ctr(document.getElementById('findingsCount'),s.total_findings);
   ctr(document.getElementById('portsCountVal'),s.open_ports_count);
   document.getElementById('portsCount').innerText=s.open_ports_count+' Open Services';
   document.getElementById('portsCount2').innerText=s.open_ports_count+' Assets';
   if(as)document.getElementById('apiStatusDisplay').innerHTML=Object.entries(as).map(([k,v])=>{const ok=v==='configured';const lbl={'nvd':'NVD v2','shodan':'Shodan','censys':'Censys v2','opencve':'OpenCVE'};return `<div class="sb-api-row"><div class="sb-api-name"><span class="dot ${ok?'dot-on':'dot-off'}"></span>${lbl[k]||k.toUpperCase()}</div><span class="api-badge ${ok?'on':'off'}">${ok?'Active':'Offline'}</span></div>`}).join('');
-  renderSevBars(sd,s.total_findings);renderPorts(di.ports||[]);_all=f;renderVulns(f);
+  renderSevBars(sd,s.total_findings);renderPorts(di.ports||[]);_all=f;_filtered=f;_curSev='all';
+  document.getElementById('sifSearch').value='';
+  document.getElementById('sifSort').value='severity';
+  renderVulns(f);
+  renderAttackProbPanel(f);
+  initSearchSort();
   setTimeout(()=>re.scrollIntoView({behavior:'smooth',block:'start'}),160);
 }
 function renderSevBars(d,tot){
@@ -1905,43 +1777,354 @@ function renderSevBars(d,tot){
 }
 function svcIco(s){if(!s)return'fa-server';s=s.toLowerCase();if(s.includes('http')||s.includes('www')||s.includes('nginx')||s.includes('apache'))return'fa-globe';if(s.includes('ssh'))return'fa-terminal';if(s.includes('sql')||s.includes('mysql')||s.includes('postgres')||s.includes('mongo'))return'fa-database';if(s.includes('ftp'))return'fa-upload';if(s.includes('smtp')||s.includes('mail')||s.includes('pop')||s.includes('imap'))return'fa-envelope';if(s.includes('dns')||s.includes('domain'))return'fa-sitemap';if(s.includes('rdp')||s.includes('vnc')||s.includes('wbt'))return'fa-desktop';if(s.includes('redis'))return'fa-memory';if(s.includes('docker'))return'fa-docker';if(s.includes('ldap'))return'fa-users';return'fa-server'}
 function renderPorts(ports){document.getElementById('portGrid').innerHTML=ports.length?ports.map((p,i)=>`<div class="svc-card" style="animation-delay:${i*28}ms"><div class="svc-ico"><i class="fas ${svcIco(p.service+' '+(p.product||''))}"></i></div><div class="svc-info"><div class="svc-nm"><span>${(p.service||'unknown').toUpperCase()}</span><span class="open-pill">OPEN</span></div><div class="svc-port">${p.port}/TCP</div><div class="svc-prod">${[p.product,p.version].filter(Boolean).join(' ')||'&mdash;'}</div></div></div>`).join(''):`<div class="empty-s" style="grid-column:1/-1"><i class="fas fa-network-wired"></i>No open services detected.</div>`}
+/* ============================================================
+   V2.0 MODULE: XSS-safe text escape
+   ============================================================ */
+function esc(s){if(!s)return '';const d=document.createElement('div');d.textContent=String(s);return d.innerHTML}
+
+/* ============================================================
+   V2.0 MODULE: CVSS Vector Parser
+   Parses CVSS v2/v3 vector strings into readable metadata chips.
+   Only derives values that can be reliably extracted from the vector.
+   ============================================================ */
+function parseCvssVector(vec){
+  if(!vec)return[];
+  const chips=[];
+  const labels={
+    AV:{N:'Network',A:'Adjacent',L:'Local',P:'Physical'},
+    AC:{L:'Low',H:'High'},
+    PR:{N:'None',L:'Low',H:'High'},
+    UI:{N:'None',R:'Required'},
+    S:{U:'Unchanged',C:'Changed'},
+    C:{N:'None',L:'Low',H:'High'},I:{N:'None',L:'Low',H:'High'},A:{N:'None',L:'Low',H:'High'}
+  };
+  const parts=vec.split('/');
+  for(const p of parts){
+    const[k,val]=p.split(':');
+    if(labels[k]&&labels[k][val]){
+      chips.push({key:k,label:labels[k][val],cls:k==='AV'?'chip-av':''})
+    }
+  }
+  return chips;
+}
+
+/* ============================================================
+   V2.0 MODULE: Attack Probability Engine
+   Heuristic model â€” NOT an AI prediction model.
+   Estimates likelihood based on available CVE metadata only.
+   ============================================================ */
+let _filtered=[],_curSev='all',_searchBound=false;
+
+function buildAttackProbabilities(findings){
+  const cats=[
+    {name:'Remote Code Execution',cwes:['CWE-94','CWE-78','CWE-77','CWE-502','CWE-434'],avBoost:'N',base:0},
+    {name:'SQL Injection',cwes:['CWE-89','CWE-564'],avBoost:'N',base:0},
+    {name:'Cross-Site Scripting',cwes:['CWE-79','CWE-80'],avBoost:'N',base:0},
+    {name:'Authentication Bypass',cwes:['CWE-287','CWE-306','CWE-862','CWE-863'],avBoost:'N',base:0},
+    {name:'Path Traversal',cwes:['CWE-22','CWE-23','CWE-36'],avBoost:'N',base:0},
+    {name:'Denial of Service',cwes:['CWE-400','CWE-770','CWE-399'],avBoost:'N',base:0},
+    {name:'Information Disclosure',cwes:['CWE-200','CWE-209','CWE-532'],avBoost:'N',base:0},
+    {name:'Privilege Escalation',cwes:['CWE-269','CWE-250'],avBoost:'L',base:0},
+    {name:'Buffer Overflow',cwes:['CWE-119','CWE-120','CWE-122','CWE-787'],avBoost:'N',base:0},
+    {name:'Cryptographic Weakness',cwes:['CWE-327','CWE-326','CWE-295','CWE-310'],avBoost:'N',base:0}
+  ];
+  const sevW={Critical:1,High:.75,Medium:.45,Low:.2,Info:.05,Unknown:.05};
+  for(const f of findings){
+    const w=sevW[f.severity]||.05;
+    const cvss=parseFloat(f.cvss)||0;
+    const cvssW=cvss/10;
+    for(const cat of cats){
+      let score=0;
+      if(f.cwe&&cat.cwes.some(c=>f.cwe.includes(c)))score+=40*w;
+      score+=cvssW*15*w;
+      if(f.vector){
+        if(f.vector.includes('AV:N'))score+=10*w;
+        if(f.vector.includes('AC:L'))score+=5*w;
+        if(f.vector.includes('PR:N'))score+=5*w;
+      }
+      if(f.summary){
+        const sl=f.summary.toLowerCase();
+        if(cat.name.toLowerCase().split(' ').some(kw=>sl.includes(kw)))score+=8*w;
+      }
+      cat.base+=score;
+    }
+  }
+  const maxVal=Math.max(...cats.map(c=>c.base),1);
+  return cats.map(c=>({
+    name:c.name,
+    pct:Math.min(Math.round(c.base/maxVal*100),100),
+    raw:c.base
+  })).sort((a,b)=>b.pct-a.pct);
+}
+
+function probClass(pct){
+  if(pct>=80)return{cls:'ap-critical',label:'CRITICAL',lcls:'cls-critical'};
+  if(pct>=60)return{cls:'ap-vhigh',label:'V.HIGH',lcls:'cls-vhigh'};
+  if(pct>=40)return{cls:'ap-high',label:'HIGH',lcls:'cls-high'};
+  if(pct>=20)return{cls:'ap-medium',label:'MEDIUM',lcls:'cls-medium'};
+  if(pct>=5)return{cls:'ap-low',label:'LOW',lcls:'cls-low'};
+  return{cls:'ap-minimal',label:'MINIMAL',lcls:'cls-minimal'};
+}
+
+/* ============================================================
+   V2.0 MODULE: AI Analyst Summary Generator
+   Generates text summary from available CVE metadata.
+   Does NOT fabricate data â€” only references parsed metadata.
+   ============================================================ */
+function generateAiSummary(findings,probs){
+  if(!findings.length)return '';
+  const total=findings.length;
+  const critical=findings.filter(f=>f.severity==='Critical').length;
+  const high=findings.filter(f=>f.severity==='High').length;
+  const topProb=probs.length?probs[0]:null;
+  const networkAV=findings.filter(f=>f.vector&&f.vector.includes('AV:N')).length;
+  let txt='<strong>'+total+'</strong> vulnerabilities identified across the target infrastructure. ';
+  if(critical>0)txt+='<strong>'+critical+'</strong> critical-severity findings require immediate attention. ';
+  if(high>0)txt+='<strong>'+high+'</strong> high-severity findings should be prioritised for remediation. ';
+  if(networkAV>0)txt+='<strong>'+networkAV+'</strong> vulnerabilities are network-exploitable (Attack Vector: Network). ';
+  if(topProb&&topProb.pct>0)txt+='The primary attack category is <strong>'+esc(topProb.name)+'</strong> ('+topProb.pct+'% probability). ';
+  return txt;
+}
+
+/* ============================================================
+   V2.0 MODULE: Unified Vulnerability Card Renderer
+   Every severity tab renders this identical component.
+   Description always visible. Expand = advanced details.
+   ============================================================ */
 function renderVulns(f){
   const list=document.getElementById('vulnList');
-  if(!f.length){list.innerHTML=`<div class="empty-s"><i class="fas fa-shield-check"></i>No CVE matches found &mdash; target appears well-hardened or services did not match known CVE keywords.</div>`;return}
-  list.innerHTML=f.map((v,i)=>{
-    const cveLink=v.id.startsWith('CVE-')?`<a href="https://nvd.nist.gov/vuln/detail/${v.id}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${v.id}</a>`:v.id;
-    const cweTag=v.cwe?`<span class="cwe-chip">${v.cwe}</span>`:'';
-    const vecTag=v.vector?`<span class="vec-chip" title="${v.vector}">${v.vector.split('/')[0]||''}</span>`:'';
-    const dateTag=v.published?`<span class="date-chip">${v.published}</span>`:'';
-    const svcIcoClass=svcIco((v.affected_service||'')+' '+(v.source||''));
-    const svcRow=v.affected_service?`<div class="vc-svc"><i class="fas ${svcIcoClass}"></i>${v.affected_service}</div>`:'';
-    return `<div class="vc severity-${v.severity||'Info'}" style="animation-delay:${Math.min(i,25)*28}ms" onclick="toggleVC(this)">
-      <div class="vc-hdr">
-        <div class="vc-ids">
-          <span class="vc-id">${cveLink}</span>
-          <span class="src-badge">${v.source}</span>
-        </div>
-        <div class="sev-tags">
-          <span class="sp ${v.severity||'Info'}">${v.severity||'Info'}</span>
-          <span class="cvss-chip">CVSS ${v.cvss>0?parseFloat(v.cvss).toFixed(1):'N/A'}</span>
-        </div>
-        <i class="fas fa-chevron-down vc-caret"></i>
-      </div>
-      <div class="vc-body">
-        <div class="vc-body-inner">
-          ${svcRow}
-          <p class="vc-sum">${v.summary||'No description available.'}</p>
-          <div class="vc-meta">
-            <span class="port-chip">PORT ${v.port||'—'}</span>
-            ${cweTag}${dateTag}${vecTag}
-          </div>
-        </div>
-      </div>
-    </div>`
-  }).join('')
+  const countEl=document.getElementById('sifCount');
+  if(countEl)countEl.textContent=f.length+' finding'+(f.length!==1?'s':'');
+  if(!f.length){
+    const sevLabel=_curSev==='all'?'':''+esc(_curSev)+' severity ';
+    list.innerHTML='<div class="empty-s"><i class="fas fa-shield-halved"></i>No '+sevLabel+'vulnerabilities found.<div class="empty-hint">Try adjusting filters or running a new scan.</div></div>';
+    return;
+  }
+  // Lazy render: first 50 immediately, rest on scroll
+  const BATCH=50;
+  const html=f.slice(0,BATCH).map((v,i)=>buildVulnCard(v,i)).join('');
+  list.innerHTML=html;
+  if(f.length>BATCH){
+    let rendered=BATCH;
+    const onScroll=()=>{
+      if(list.scrollTop+list.clientHeight>=list.scrollHeight-120){
+        const next=f.slice(rendered,rendered+BATCH);
+        if(!next.length){list.removeEventListener('scroll',onScroll);return;}
+        const tmp=document.createElement('div');
+        tmp.innerHTML=next.map((v,i)=>buildVulnCard(v,rendered+i)).join('');
+        while(tmp.firstChild)list.appendChild(tmp.firstChild);
+        rendered+=next.length;
+      }
+    };
+    list.addEventListener('scroll',onScroll);
+  }
+  // Event delegation for expand toggle
+  list.onclick=function(e){
+    const btn=e.target.closest('.vc-expand-btn');
+    if(btn){
+      const card=btn.closest('.vc');
+      if(card)card.classList.toggle('expanded');
+      return;
+    }
+    // Don't toggle on link clicks
+    if(e.target.tagName==='A')return;
+  };
 }
-function toggleVC(el){el.classList.toggle('expanded')}
-function fvulns(sev,btn){document.querySelectorAll('.fb').forEach(b=>b.classList.remove('active'));btn.classList.add('active');renderVulns(sev==='all'?_all:_all.filter(v=>v.severity===sev))}
+
+function buildVulnCard(v,i){
+  const id=esc(v.id||'');
+  const sev=esc(v.severity||'Info');
+  const src=esc(v.source||'');
+  const cvss=v.cvss>0?parseFloat(v.cvss).toFixed(1):'N/A';
+  const summary=esc(v.summary||'No description available.');
+  const cwe=v.cwe?esc(v.cwe):'';
+  const port=v.port?esc(String(v.port)):'â€”';
+  const published=v.published?esc(v.published):'';
+  const vector=v.vector?esc(v.vector):'';
+  const svcStr=esc(v.affected_service||'');
+  const svcIcoClass=svcIco((v.affected_service||'')+' '+(v.source||''));
+
+  // Parse CVSS vector into chips
+  const vecChips=parseCvssVector(v.vector||'');
+  const chipsHtml=vecChips.map(c=>'<span class="vc-chip '+c.cls+'">'+esc(c.key)+': '+esc(c.label)+'</span>').join('');
+
+  // CVE link (safe â€” id is already escaped)
+  const cveLink=v.id&&v.id.startsWith('CVE-')
+    ?'<a href="https://nvd.nist.gov/vuln/detail/'+id+'" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">'+id+'</a>'
+    :id;
+
+  // Product/service line
+  const prodLine=svcStr?'<div class="vc-prod-line"><span class="vc-prod-name"><i class="fas '+svcIcoClass+'"></i>'+svcStr+'</span><span class="vc-prod-detail">Port '+port+'/TCP</span></div>':'';
+
+  // Bottom chips
+  let bottom='<span class="port-chip">PORT '+port+'</span>';
+  if(cwe)bottom+='<span class="cwe-chip">'+cwe+'</span>';
+  if(published)bottom+='<span class="date-chip">'+published+'</span>';
+  if(vector)bottom+='<span class="vec-chip" title="'+vector+'">'+vector.split('/')[0]+'</span>';
+
+  // Advanced details (shown on expand)
+  let advHtml='<div class="vc-adv-grid">';
+  advHtml+='<div class="vc-adv-item"><strong>EPSS</strong>N/A</div>';
+  advHtml+='<div class="vc-adv-item"><strong>KEV</strong>N/A</div>';
+  advHtml+='<div class="vc-adv-item"><strong>Exploit Status</strong>Unknown</div>';
+  advHtml+='<div class="vc-adv-item"><strong>Patch Available</strong>Unknown</div>';
+  advHtml+='<div class="vc-adv-item"><strong>Vendor</strong>N/A</div>';
+  advHtml+='<div class="vc-adv-item"><strong>Fixed Version</strong>N/A</div>';
+  advHtml+='<div class="vc-adv-item"><strong>Source</strong>'+src+'</div>';
+  advHtml+='<div class="vc-adv-item"><strong>CVSS Vector</strong>'+(vector||'N/A')+'</div>';
+  advHtml+='</div>';
+  if(v.id&&v.id.startsWith('CVE-'))advHtml+='<a href="https://nvd.nist.gov/vuln/detail/'+id+'" target="_blank" rel="noopener noreferrer" class="vc-adv-link"><i class="fas fa-external-link-alt"></i>View on NVD</a>';
+
+  return '<div class="vc severity-'+sev+'" style="animation-delay:'+Math.min(i,25)*28+'ms">'
+    +'<div class="vc-hdr">'
+      +'<div class="vc-ids"><span class="vc-id">'+cveLink+'</span><span class="src-badge">'+src+'</span></div>'
+      +'<div class="sev-tags"><span class="sp '+sev+'">'+sev+'</span><span class="cvss-chip">CVSS '+cvss+'</span></div>'
+    +'</div>'
+    +'<div class="vc-visible">'
+      +prodLine
+      +'<div class="vc-desc">'+summary+'</div>'
+      +(chipsHtml?'<div class="vc-chips">'+chipsHtml+'</div>':'')
+      +'<div class="vc-bottom">'+bottom+'</div>'
+    +'</div>'
+    +'<div class="vc-adv"><div class="vc-adv-inner"><div class="vc-adv-title">Extended Intelligence</div>'+advHtml+'</div></div>'
+    +'<div class="vc-expand-btn"><i class="fas fa-chevron-down"></i>Details</div>'
+  +'</div>';
+}
+
+/* ============================================================
+   V2.0 MODULE: Attack Probability Panel Renderer
+   Renders probability bars, SVG radar chart, SVG doughnut chart.
+   ============================================================ */
+function renderAttackProbPanel(findings){
+  const panel=document.getElementById('attackProbPanel');
+  if(!findings||!findings.length){panel.style.display='none';return;}
+  panel.style.display='block';
+  const probs=buildAttackProbabilities(findings);
+  // AI Summary
+  document.getElementById('apSummary').innerHTML=generateAiSummary(findings,probs);
+  // Probability bars
+  const barsEl=document.getElementById('apBars');
+  barsEl.innerHTML=probs.map(p=>{
+    const pc=probClass(p.pct);
+    return '<div class="ap-bar-row">'
+      +'<span class="ap-bar-label">'+esc(p.name)+'</span>'
+      +'<div class="ap-bar-track"><div class="ap-bar-fill '+pc.cls+'" style="width:0%" data-w="'+p.pct+'"></div></div>'
+      +'<span class="ap-bar-pct">'+p.pct+'%</span>'
+      +'<span class="ap-bar-class '+pc.lcls+'">'+pc.label+'</span>'
+    +'</div>';
+  }).join('');
+  // Animate bars
+  setTimeout(()=>barsEl.querySelectorAll('.ap-bar-fill[data-w]').forEach(b=>b.style.width=b.dataset.w+'%'),60);
+  // Charts
+  const chartsEl=document.getElementById('apCharts');
+  chartsEl.innerHTML=renderRadarChart(probs.slice(0,6))+renderDoughnutChart(probs.slice(0,6));
+}
+
+function renderRadarChart(probs){
+  if(!probs.length)return '';
+  const n=probs.length,cx=110,cy=110,maxR=85;
+  const colors=['#ef4444','#f97316','#eab308','#06b6d4','#3b82f6','#22d3ee'];
+  const pts=probs.map((p,i)=>{
+    const angle=(Math.PI*2*i/n)-Math.PI/2;
+    const r=maxR*p.pct/100;
+    return{x:cx+r*Math.cos(angle),y:cy+r*Math.sin(angle)};
+  });
+  const polyPoints=pts.map(p=>p.x.toFixed(1)+','+p.y.toFixed(1)).join(' ');
+  let rings='';
+  [25,50,75,100].forEach(pct=>{
+    const r=maxR*pct/100;
+    rings+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="rgba(255,255,255,.06)" stroke-width="0.5"/>';
+  });
+  let axes='';
+  probs.forEach((p,i)=>{
+    const angle=(Math.PI*2*i/n)-Math.PI/2;
+    const ex=cx+maxR*Math.cos(angle),ey=cy+maxR*Math.sin(angle);
+    const lx=cx+(maxR+14)*Math.cos(angle),ly=cy+(maxR+14)*Math.sin(angle);
+    axes+='<line x1="'+cx+'" y1="'+cy+'" x2="'+ex.toFixed(1)+'" y2="'+ey.toFixed(1)+'" stroke="rgba(255,255,255,.08)" stroke-width="0.5"/>';
+    axes+='<text x="'+lx.toFixed(1)+'" y="'+ly.toFixed(1)+'" fill="#64748b" font-size="6" font-family="var(--mono)" text-anchor="middle" dominant-baseline="central">'+esc(p.name.split(' ')[0])+'</text>';
+  });
+  let svg='<svg viewBox="0 0 220 220" class="ap-chart-svg" role="img" aria-label="Attack probability radar chart">';
+  svg+=rings+axes;
+  svg+='<polygon points="'+polyPoints+'" fill="rgba(6,182,212,.12)" stroke="var(--accent)" stroke-width="1.5"/>';
+  pts.forEach((p,i)=>{svg+='<circle cx="'+p.x.toFixed(1)+'" cy="'+p.y.toFixed(1)+'" r="3" fill="'+colors[i%colors.length]+'"/>';});
+  svg+='</svg>';
+  return '<div class="ap-chart-wrap"><div class="ap-chart-title">Attack Vector Radar</div>'+svg+'</div>';
+}
+
+function renderDoughnutChart(probs){
+  if(!probs.length)return '';
+  const colors=['#ef4444','#f97316','#eab308','#06b6d4','#3b82f6','#22d3ee'];
+  const total=probs.reduce((s,p)=>s+p.pct,0)||1;
+  const cx=100,cy=100,r=70,sw=18;
+  let offset=0;
+  const circ=2*Math.PI*r;
+  let arcs='';
+  probs.forEach((p,i)=>{
+    const pct=p.pct/total;
+    const dash=circ*pct;
+    const gap=circ-dash;
+    arcs+='<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="'+colors[i%colors.length]+'" stroke-width="'+sw+'" stroke-dasharray="'+dash.toFixed(2)+' '+gap.toFixed(2)+'" stroke-dashoffset="'+(-offset).toFixed(2)+'" transform="rotate(-90 '+cx+' '+cy+')" opacity=".85"/>';
+    offset+=dash;
+  });
+  let svg='<svg viewBox="0 0 200 200" class="ap-chart-svg" role="img" aria-label="Severity distribution doughnut chart">';
+  svg+=arcs;
+  svg+='<text x="'+cx+'" y="'+cy+'" fill="var(--t1)" font-size="18" font-weight="700" font-family="var(--mono)" text-anchor="middle" dominant-baseline="central">'+probs.length+'</text>';
+  svg+='<text x="'+cx+'" y="'+(cy+14)+'" fill="var(--t4)" font-size="7" font-family="var(--mono)" text-anchor="middle">CATEGORIES</text>';
+  svg+='</svg>';
+  const legend=probs.map((p,i)=>'<span class="ap-legend-item"><span class="ap-legend-dot" style="background:'+colors[i%colors.length]+'"></span>'+esc(p.name)+'</span>').join('');
+  return '<div class="ap-chart-wrap"><div class="ap-chart-title">Category Distribution</div>'+svg+'<div class="ap-legend">'+legend+'</div></div>';
+}
+
+/* ============================================================
+   V2.0 MODULE: Search & Sort
+   Debounced search, memoised filtering.
+   ============================================================ */
+function initSearchSort(){
+  if(_searchBound)return;
+  _searchBound=true;
+  const searchEl=document.getElementById('sifSearch');
+  const sortEl=document.getElementById('sifSort');
+  let debounce=null;
+  searchEl.addEventListener('input',()=>{
+    clearTimeout(debounce);
+    debounce=setTimeout(()=>applyFilters(),180);
+  });
+  sortEl.addEventListener('change',()=>applyFilters());
+}
+
+function applyFilters(){
+  const q=(document.getElementById('sifSearch').value||'').trim().toLowerCase();
+  const sort=document.getElementById('sifSort').value;
+  let data=_curSev==='all'?_all:_all.filter(v=>v.severity===_curSev);
+  if(q){
+    data=data.filter(v=>{
+      return(v.id&&v.id.toLowerCase().includes(q))
+        ||(v.summary&&v.summary.toLowerCase().includes(q))
+        ||(v.cwe&&v.cwe.toLowerCase().includes(q))
+        ||(v.affected_service&&v.affected_service.toLowerCase().includes(q))
+        ||(v.source&&v.source.toLowerCase().includes(q))
+        ||(v.port&&String(v.port).includes(q));
+    });
+  }
+  const sevOrder={Critical:0,High:1,Medium:2,Low:3,Info:4,Unknown:5};
+  switch(sort){
+    case'severity':data.sort((a,b)=>(sevOrder[a.severity]||5)-(sevOrder[b.severity]||5));break;
+    case'cvss-desc':data.sort((a,b)=>(parseFloat(b.cvss)||0)-(parseFloat(a.cvss)||0));break;
+    case'cvss-asc':data.sort((a,b)=>(parseFloat(a.cvss)||0)-(parseFloat(b.cvss)||0));break;
+    case'cve-desc':data.sort((a,b)=>(b.id||'').localeCompare(a.id||''));break;
+    case'cve-asc':data.sort((a,b)=>(a.id||'').localeCompare(b.id||''));break;
+  }
+  _filtered=data;
+  renderVulns(data);
+}
+
+function fvulns(sev,btn){
+  document.querySelectorAll('.fb').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  _curSev=sev;
+  applyFilters();
+}
+
 function exportReport(){
   if(!_last)return showError('No scan data available yet.');
   const b=new Blob([JSON.stringify(_last,null,2)],{type:'application/json'});
