@@ -1,18 +1,20 @@
-﻿<?php
-/**
- * VulnScope Pro Ã¢â‚¬â€ Enterprise Intelligence Engine v5.0
- * Multi-source CVE correlation: NVD v2, Shodan, Censys v2, CIRCL CVE Search
- */
+<?php
+declare(strict_types=1);
 
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
+/**
+ * VulnScope Pro — Enterprise Intelligence Engine v5.0
+ * Multi-source CVE correlation: NVD v2, Shodan, Censys v2, CIRCL CVE Search
+ */
+
 defined('DB_PATH')            or define('DB_PATH', 'vulnscope_v2.sqlite');
 defined('SCAN_TOKEN')         or define('SCAN_TOKEN', 'SECURE_SCAN_TOKEN_2024');
 defined('ALLOW_INTERNAL_SCAN') or define('ALLOW_INTERNAL_SCAN', true);
 
-// API keys Ã¢â‚¬â€ loaded from environment variables (set in Render dashboard or .env)
+// API keys — loaded from environment variables (set in Render dashboard or .env)
 defined('NVD_API_KEY')      or define('NVD_API_KEY',      getenv('NVD_API_KEY')      ?: '');
 defined('SHODAN_API_KEY')   or define('SHODAN_API_KEY',   getenv('SHODAN_API_KEY')   ?: '');
 defined('CENSYS_API_TOKEN') or define('CENSYS_API_TOKEN', getenv('CENSYS_API_TOKEN') ?: '');
