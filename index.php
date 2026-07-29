@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 declare(strict_types=1);
 
 if (session_status() === PHP_SESSION_NONE) {
@@ -57,7 +57,7 @@ if (extension_loaded('pdo_sqlite')) {
 
 
 /* =========================================================
-   HTTP HELPERS Ã¢â‚¬â€ Sequential & Parallel
+   HTTP HELPERS — Sequential & Parallel
    ========================================================= */
 function safe_curl($url, $headers = [], $post_data = null, $timeout = 12) {
     $ch = curl_init($url);
@@ -80,7 +80,7 @@ function safe_curl($url, $headers = [], $post_data = null, $timeout = 12) {
     $err      = curl_error($ch);
     curl_close($ch);
     if ($err || $code >= 400 || !$response) {
-        error_log("safe_curl [$code] $url Ã¢â‚¬â€ $err");
+        error_log("safe_curl [$code] $url — $err");
         return null;
     }
     return json_decode($response, true);
@@ -156,7 +156,7 @@ function classify_severity($cvss) {
 }
 
 /**
- * Advanced risk scoring Ã¢â‚¬â€ produces realistic varied scores.
+ * Advanced risk scoring — produces realistic varied scores.
  *
  * Algorithm:
  * 1. Base weighted score from severity buckets
@@ -187,14 +187,14 @@ function calculate_risk_score(array $findings, int $open_ports_count = 0): int {
     $avg_cvss   = count($findings) > 0 ? $cvss_sum / count($findings) : 0;
     $cvss_bonus = min(20, round($avg_cvss * 2.2));
 
-    // Step 3: Attack surface multiplier Ã¢â‚¬â€ more open ports = wider exposure
+    // Step 3: Attack surface multiplier — more open ports = wider exposure
     // 0-5 ports: 1.0x, 6-10: 1.15x, 11-20: 1.25x, 21+: 1.35x
     if ($open_ports_count <= 5)       $surface = 1.0;
     elseif ($open_ports_count <= 10)  $surface = 1.15;
     elseif ($open_ports_count <= 20)  $surface = 1.25;
     else                              $surface = 1.35;
 
-    // Step 4: Criticality cascade bonus Ã¢â‚¬â€ multiple criticals amplify each other
+    // Step 4: Criticality cascade bonus — multiple criticals amplify each other
     $crit_bonus = 0;
     if ($counts['Critical'] >= 3)     $crit_bonus = 15;
     elseif ($counts['Critical'] >= 1) $crit_bonus = 8;
@@ -204,19 +204,126 @@ function calculate_risk_score(array $findings, int $open_ports_count = 0): int {
     $sev_types = count(array_filter($counts));
     $diversity = $sev_types >= 4 ? 5 : ($sev_types >= 3 ? 3 : 0);
 
-    // Combine
-    $raw = ($base + $cvss_bonus + $crit_bonus + $diversity) * $surface;
+    // Step 6: CISA KEV bonus — findings with confirmed real-world exploitation
+    // are a materially bigger risk than CVSS alone captures.
+    $kev_count = 0;
+    foreach ($findings as $f) {
+        if (!empty($f['is_kev'])) $kev_count++;
+    }
+    $kev_bonus = min(25, $kev_count * 9);
 
-    // Step 6: Normalise to 0Ã¢â‚¬â€œ100 with a logarithmic curve so:
-    // Ã¢â‚¬â€ small vulns (~5 findings) score 20Ã¢â‚¬â€œ40
-    // Ã¢â‚¬â€ medium (~20-30 findings) score 50Ã¢â‚¬â€œ70
-    // Ã¢â‚¬â€ large (50+ findings) score 75Ã¢â‚¬â€œ95
-    // Ã¢â‚¬â€ truly catastrophic (100+ criticals) score 95-100
-    // Raw scores typically land 10Ã¢â‚¬â€œ400+; map to 0-100
+    // Combine
+    $raw = ($base + $cvss_bonus + $crit_bonus + $diversity + $kev_bonus) * $surface;
+
+    // Step 7: Normalise to 0–100 with a logarithmic curve so:
+    // — small vulns (~5 findings) score 20–40
+    // — medium (~20-30 findings) score 50–70
+    // — large (50+ findings) score 75–95
+    // — truly catastrophic (100+ criticals) score 95-100
+    // Raw scores typically land 10–400+; map to 0-100
     $normalised = round(100 * (1 - exp(-$raw / 120)));
 
     // Hard floor/ceiling
     return (int) max(1, min(100, $normalised));
+}
+
+/* =========================================================
+   INTELLIGENCE SOURCE: FIRST.org EPSS (Exploit Prediction Scoring System)
+   Free, keyless API. Batches up to 90 CVEs per request.
+   ========================================================= */
+function query_epss(array $cve_ids): array {
+    $cve_ids = array_values(array_unique(array_filter($cve_ids)));
+    if (empty($cve_ids)) return [];
+    $out = [];
+    foreach (array_chunk($cve_ids, 90) as $chunk) {
+        $url  = 'https://api.first.org/data/v1/epss?cve=' . implode(',', array_map('urlencode', $chunk));
+        $data = safe_curl($url, [], null, 10);
+        if ($data && !empty($data['data']) && is_array($data['data'])) {
+            foreach ($data['data'] as $row) {
+                if (empty($row['cve'])) continue;
+                $out[$row['cve']] = [
+                    'score'      => (float)($row['epss'] ?? 0),
+                    'percentile' => (float)($row['percentile'] ?? 0),
+                ];
+            }
+        }
+    }
+    return $out;
+}
+
+/* =========================================================
+   INTELLIGENCE SOURCE: CISA Known Exploited Vulnerabilities (KEV)
+   Cached to disk for 24h since the catalog only updates a few
+   times a week — keeps repeat scans fast and avoids rate limits.
+   ========================================================= */
+function query_kev(): array {
+    static $mem_cache = null;
+    if ($mem_cache !== null) return $mem_cache;
+
+    $cache_file = sys_get_temp_dir() . '/vulnscope_kev_catalog.json';
+    if (is_file($cache_file) && (time() - filemtime($cache_file)) < 86400) {
+        $cached = json_decode((string)@file_get_contents($cache_file), true);
+        if (is_array($cached)) { $mem_cache = $cached; return $mem_cache; }
+    }
+
+    $data = safe_curl('https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json', [], null, 10);
+    $set  = [];
+    if ($data && !empty($data['vulnerabilities']) && is_array($data['vulnerabilities'])) {
+        foreach ($data['vulnerabilities'] as $v) {
+            if (empty($v['cveID'])) continue;
+            $set[$v['cveID']] = [
+                'dateAdded'     => $v['dateAdded'] ?? '',
+                'ransomwareUse' => $v['knownRansomwareCampaignUse'] ?? 'Unknown',
+            ];
+        }
+        @file_put_contents($cache_file, json_encode($set));
+    } elseif (is_file($cache_file)) {
+        // Live fetch failed (network/rate-limit) — fall back to stale cache rather than nothing.
+        $cached = json_decode((string)@file_get_contents($cache_file), true);
+        if (is_array($cached)) $set = $cached;
+    }
+
+    $mem_cache = $set;
+    return $mem_cache;
+}
+
+/**
+ * Cross-references every CVE finding against EPSS exploit-likelihood
+ * scores and the CISA KEV catalog, mutating $findings in place.
+ * This is the correlation layer that turns raw CVE hits into
+ * triage-ready intelligence.
+ */
+function enrich_findings_intel(array &$findings): void {
+    $cve_ids = [];
+    foreach ($findings as $f) {
+        if (!empty($f['id']) && preg_match('/^CVE-\d{4}-\d+$/', $f['id'])) {
+            $cve_ids[] = $f['id'];
+        }
+    }
+    if (empty($cve_ids)) return;
+
+    $epss = query_epss($cve_ids);
+    $kev  = query_kev();
+
+    foreach ($findings as &$f) {
+        $id = $f['id'] ?? '';
+        if (isset($epss[$id])) {
+            $f['epss_score']      = $epss[$id]['score'];
+            $f['epss_percentile'] = $epss[$id]['percentile'];
+        }
+        if (isset($kev[$id])) {
+            $f['is_kev']         = true;
+            $f['kev_date_added'] = $kev[$id]['dateAdded'];
+            $f['kev_ransomware'] = $kev[$id]['ransomwareUse'];
+            // A KEV-listed finding is being exploited right now — never let it read as Low/Info.
+            if (($f['severity'] ?? '') !== 'Critical' && (float)($f['cvss'] ?? 0) < 9.0) {
+                $f['severity'] = 'High';
+            }
+        } else {
+            $f['is_kev'] = false;
+        }
+    }
+    unset($f);
 }
 
 function normalize_product(string $product): string {
@@ -238,7 +345,7 @@ function query_nvd(string $keyword, int $limit = 30): array {
     $results = [];
     $seen    = [];
 
-    // Single keyword search (removed duplicate exactMatch call Ã¢â‚¬â€ saves 50% NVD time)
+    // Single keyword search (removed duplicate exactMatch call — saves 50% NVD time)
     $url1 = NVD_API_BASE . '?keywordSearch=' . urlencode($keyword) . '&resultsPerPage=' . $limit;
     $res1 = safe_curl($url1, $headers, null, 12);
 
@@ -267,7 +374,7 @@ function query_nvd(string $keyword, int $limit = 30): array {
                 $vector = $m['cvssData']['vectorString'] ?? '';
             }
 
-            // Description Ã¢â‚¬â€ prefer English
+            // Description — prefer English
             $desc = 'No description available.';
             foreach (($cve['descriptions'] ?? []) as $d) {
                 if ($d['lang'] === 'en') { $desc = $d['value']; break; }
@@ -790,7 +897,7 @@ if (isset($_GET['action'])) {
                             exit;
                         }
                     }
-                } catch (Exception $e) { /* cache miss Ã¢â‚¬â€ proceed with full scan */ }
+                } catch (Exception $e) { /* cache miss — proceed with full scan */ }
             }
 
             $nmap_xml   = run_nmap($host);
@@ -923,7 +1030,7 @@ if (isset($_GET['action'])) {
                                     'id'              => $fake_id,
                                     'cvss'            => $cvss_score,
                                     'severity'        => classify_severity($cvss_score),
-                                    'summary'         => $vuln_name . ' Ã¢â‚¬â€ ' . substr($script_out, 0, 200),
+                                    'summary'         => $vuln_name . ' — ' . substr($script_out, 0, 200),
                                     'source'          => 'Nmap NSE',
                                     'vector'          => '',
                                     'cwe'             => '',
@@ -1134,6 +1241,7 @@ if (isset($_GET['action'])) {
             }
 
             $findings = array_values($findings);
+            enrich_findings_intel($findings);
 
             usort($findings, function ($a, $b) {
                 $order = ['Critical' => 5, 'High' => 4, 'Medium' => 3, 'Low' => 2, 'Info' => 1, 'Unknown' => 0];
@@ -1381,7 +1489,7 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
    Every severity tab renders this identical component.
    Description always visible. Expand = advanced details only.
    ============================================================ */
-.vc{border-radius:var(--r12);padding:0;border:1px solid var(--border);background:rgba(255,255,255,.016);transition:border-color .18s ease,background .18s ease;animation:cin .25s ease both;position:relative;overflow:hidden}
+.vc{border-radius:var(--r12);padding:0;border:1px solid var(--border);background:rgba(255,255,255,.016);transition:border-color .18s ease,background .18s ease;animation:cin .25s ease both;position:relative;overflow:hidden;flex-shrink:0}
 .vc::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;transition:opacity .2s}
 .vc.severity-Critical::before{background:var(--danger)}.vc.severity-Critical{border-color:var(--danger-border);background:var(--danger-dim)}
 .vc.severity-High::before{background:var(--warn)}.vc.severity-High{border-color:rgba(249,115,22,.2);background:var(--warn-dim)}
@@ -1425,6 +1533,10 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
 .date-chip{display:inline-flex;align-items:center;height:18px;font-size:8px;font-family:var(--mono);color:var(--t4);line-height:1}
 .vec-chip{display:inline-flex;align-items:center;height:18px;padding:0 5px;font-size:8px;font-family:var(--mono);color:var(--t4);background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:3px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;box-sizing:border-box;line-height:1}
 .na-chip{display:inline-flex;align-items:center;height:18px;padding:0 6px;font-size:8px;font-family:var(--mono);color:var(--t4);background:transparent;border:1px solid var(--border);border-radius:3px;opacity:.5;line-height:1}
+.kev-chip{display:inline-flex;align-items:center;gap:4px;height:18px;padding:0 7px;font-size:8px;font-weight:700;font-family:var(--mono);letter-spacing:.06em;text-transform:uppercase;color:#fff;background:linear-gradient(90deg,#dc2626,#ef4444);border-radius:4px;box-sizing:border-box;line-height:1;animation:kevpulse 2s infinite}
+@keyframes kevpulse{0%,100%{opacity:1}50%{opacity:.72}}
+.vc.vc-kev{border-color:var(--danger-border);box-shadow:0 0 0 1px rgba(239,68,68,.15) inset}
+.vc.vc-kev::before{background:var(--danger)!important;width:4px}
 /* --- Expand toggle --------------------------------------- */
 .vc-expand-btn{display:flex;align-items:center;justify-content:center;gap:5px;padding:6px 16px;border-top:1px solid rgba(255,255,255,.04);font-size:8px;font-family:var(--mono);font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--t4);cursor:pointer;user-select:none;transition:var(--ease)}
 .vc-expand-btn:hover{color:var(--accent);background:rgba(6,182,212,.03)}
@@ -1444,7 +1556,7 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
 /* ============================================================
    ATTACK PROBABILITY ANALYSIS PANEL
    ============================================================ */
-.attack-prob-panel{margin-top:16px}
+.attack-prob-panel{margin-top:16px;grid-column:1/-1}
 .ap-disclaimer{font-size:9px;color:var(--t4);font-family:var(--mono);line-height:1.55;padding:10px 18px;border-bottom:1px solid var(--border);font-style:italic}
 .ap-body{padding:18px;display:flex;flex-direction:column;gap:18px}
 .ap-summary{font-size:11px;color:var(--t2);line-height:1.65;padding:12px 14px;background:rgba(6,182,212,.04);border:1px solid var(--accent-border);border-radius:var(--r8);word-break:break-word}
@@ -1659,10 +1771,10 @@ foreach ($_alist as $_ak => $_al):
             </div>
             <select class="sif-sort" id="sifSort" aria-label="Sort findings">
               <option value="severity">Sort: Severity</option>
-              <option value="cvss-desc">Sort: CVSS â†“</option>
-              <option value="cvss-asc">Sort: CVSS â†‘</option>
-              <option value="cve-desc">Sort: CVE ID â†“</option>
-              <option value="cve-asc">Sort: CVE ID â†‘</option>
+              <option value="cvss-desc">Sort: CVSS ↓</option>
+              <option value="cvss-asc">Sort: CVSS ↑</option>
+              <option value="cve-desc">Sort: CVE ID ↓</option>
+              <option value="cve-asc">Sort: CVE ID ↑</option>
             </select>
             <span class="sif-count" id="sifCount"></span>
           </div>
@@ -1757,7 +1869,7 @@ function renderDashboard(resp){
   document.getElementById('resTarget').innerText='HOST: '+s.target;
   document.getElementById('resIp').innerText=s.ip;
   const[rl,rc]=riskMeta(s.risk_score);
-  document.getElementById('riskLabel').innerText=rl+' Ã¢â‚¬â€ Score: '+s.risk_score+'/100';
+  document.getElementById('riskLabel').innerText=rl+' — Score: '+s.risk_score+'/100';
   const rb=document.getElementById('riskBadge');rb.className='risk-badge '+rc;rb.innerHTML='<i class="fas fa-triangle-exclamation"></i> '+rl;rb.style.display='inline-flex';
   ctr(document.getElementById('findingsCount'),s.total_findings);
   ctr(document.getElementById('portsCountVal'),s.open_ports_count);
@@ -1767,9 +1879,9 @@ function renderDashboard(resp){
   renderSevBars(sd,s.total_findings);renderPorts(di.ports||[]);_all=f;_filtered=f;_curSev='all';
   document.getElementById('sifSearch').value='';
   document.getElementById('sifSort').value='severity';
-  renderVulns(f);
-  renderAttackProbPanel(f);
   initSearchSort();
+  applyFilters();
+  renderAttackProbPanel(f);
   setTimeout(()=>re.scrollIntoView({behavior:'smooth',block:'start'}),160);
 }
 function renderSevBars(d,tot){
@@ -1812,7 +1924,7 @@ function parseCvssVector(vec){
 
 /* ============================================================
    V2.0 MODULE: Attack Probability Engine
-   Heuristic model â€” NOT an AI prediction model.
+   Heuristic model — NOT an AI prediction model.
    Estimates likelihood based on available CVE metadata only.
    ============================================================ */
 let _filtered=[],_curSev='all',_searchBound=false;
@@ -1871,7 +1983,7 @@ function probClass(pct){
 /* ============================================================
    V2.0 MODULE: AI Analyst Summary Generator
    Generates text summary from available CVE metadata.
-   Does NOT fabricate data â€” only references parsed metadata.
+   Does NOT fabricate data — only references parsed metadata.
    ============================================================ */
 function generateAiSummary(findings,probs){
   if(!findings.length)return '';
@@ -1880,7 +1992,9 @@ function generateAiSummary(findings,probs){
   const high=findings.filter(f=>f.severity==='High').length;
   const topProb=probs.length?probs[0]:null;
   const networkAV=findings.filter(f=>f.vector&&f.vector.includes('AV:N')).length;
+  const kevCount=findings.filter(f=>f.is_kev).length;
   let txt='<strong>'+total+'</strong> vulnerabilities identified across the target infrastructure. ';
+  if(kevCount>0)txt+='<strong style="color:var(--danger)">'+kevCount+'</strong> finding'+(kevCount!==1?'s are':' is')+' listed in the CISA Known Exploited Vulnerabilities catalog &mdash; treat as top priority. ';
   if(critical>0)txt+='<strong>'+critical+'</strong> critical-severity findings require immediate attention. ';
   if(high>0)txt+='<strong>'+high+'</strong> high-severity findings should be prioritised for remediation. ';
   if(networkAV>0)txt+='<strong>'+networkAV+'</strong> vulnerabilities are network-exploitable (Attack Vector: Network). ';
@@ -1940,7 +2054,7 @@ function buildVulnCard(v,i){
   const cvss=v.cvss>0?parseFloat(v.cvss).toFixed(1):'N/A';
   const summary=esc(v.summary||'No description available.');
   const cwe=v.cwe?esc(v.cwe):'';
-  const port=v.port?esc(String(v.port)):'â€”';
+  const port=v.port?esc(String(v.port)):'—';
   const published=v.published?esc(v.published):'';
   const vector=v.vector?esc(v.vector):'';
   const svcStr=esc(v.affected_service||'');
@@ -1950,7 +2064,7 @@ function buildVulnCard(v,i){
   const vecChips=parseCvssVector(v.vector||'');
   const chipsHtml=vecChips.map(c=>'<span class="vc-chip '+c.cls+'">'+esc(c.key)+': '+esc(c.label)+'</span>').join('');
 
-  // CVE link (safe â€” id is already escaped)
+  // CVE link (safe — id is already escaped)
   const cveLink=v.id&&v.id.startsWith('CVE-')
     ?'<a href="https://nvd.nist.gov/vuln/detail/'+id+'" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()">'+id+'</a>'
     :id;
@@ -1959,15 +2073,18 @@ function buildVulnCard(v,i){
   const prodLine=svcStr?'<div class="vc-prod-line"><span class="vc-prod-name"><i class="fas '+svcIcoClass+'"></i>'+svcStr+'</span><span class="vc-prod-detail">Port '+port+'/TCP</span></div>':'';
 
   // Bottom chips
-  let bottom='<span class="port-chip">PORT '+port+'</span>';
+  let bottom=v.is_kev?'<span class="kev-chip"><i class="fas fa-triangle-exclamation"></i> KEV: EXPLOITED</span>':'';
+  bottom+='<span class="port-chip">PORT '+port+'</span>';
   if(cwe)bottom+='<span class="cwe-chip">'+cwe+'</span>';
   if(published)bottom+='<span class="date-chip">'+published+'</span>';
   if(vector)bottom+='<span class="vec-chip" title="'+vector+'">'+vector.split('/')[0]+'</span>';
 
   // Advanced details (shown on expand)
+  const epssTxt=(v.epss_score!=null)?(v.epss_score*100).toFixed(2)+'% <span style="opacity:.6">(pctl '+Math.round((v.epss_percentile||0)*100)+')</span>':'N/A';
+  const kevTxt=v.is_kev?'<span style="color:var(--danger)"><i class="fas fa-triangle-exclamation"></i> Actively Exploited'+(v.kev_date_added?' since '+esc(v.kev_date_added):'')+'</span>':'Not Listed';
   let advHtml='<div class="vc-adv-grid">';
-  advHtml+='<div class="vc-adv-item"><strong>EPSS</strong>N/A</div>';
-  advHtml+='<div class="vc-adv-item"><strong>KEV</strong>N/A</div>';
+  advHtml+='<div class="vc-adv-item"><strong>EPSS</strong>'+epssTxt+'</div>';
+  advHtml+='<div class="vc-adv-item"><strong>CISA KEV</strong>'+kevTxt+'</div>';
   advHtml+='<div class="vc-adv-item"><strong>Exploit Status</strong>Unknown</div>';
   advHtml+='<div class="vc-adv-item"><strong>Patch Available</strong>Unknown</div>';
   advHtml+='<div class="vc-adv-item"><strong>Vendor</strong>N/A</div>';
@@ -1977,7 +2094,7 @@ function buildVulnCard(v,i){
   advHtml+='</div>';
   if(v.id&&v.id.startsWith('CVE-'))advHtml+='<a href="https://nvd.nist.gov/vuln/detail/'+id+'" target="_blank" rel="noopener noreferrer" class="vc-adv-link"><i class="fas fa-external-link-alt"></i>View on NVD</a>';
 
-  return '<div class="vc severity-'+sev+'" style="animation-delay:'+Math.min(i,25)*28+'ms">'
+  return '<div class="vc severity-'+sev+(v.is_kev?' vc-kev':'')+'" style="animation-delay:'+Math.min(i,25)*28+'ms">'
     +'<div class="vc-hdr">'
       +'<div class="vc-ids"><span class="vc-id">'+cveLink+'</span><span class="src-badge">'+src+'</span></div>'
       +'<div class="sev-tags"><span class="sp '+sev+'">'+sev+'</span><span class="cvss-chip">CVSS '+cvss+'</span></div>'
