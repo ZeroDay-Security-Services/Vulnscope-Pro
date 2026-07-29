@@ -1617,7 +1617,7 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
 #error-msg{font-size:12px;color:var(--t2);line-height:1.45}
 .t-close{background:none;border:none;color:var(--t3);cursor:pointer;font-size:16px;transition:var(--ease);padding:0;line-height:1}
 .t-close:hover{color:var(--t1)}
-#sb-ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:199;backdrop-filter:blur(2px)}
+#sb-ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:199}
 #sb-ov.on{display:block}
 /* ============================================================
    RESPONSIVE BREAKPOINTS (v2.0)
@@ -1818,6 +1818,10 @@ let _last=null,_all=[];
 })();
 function toggleSB(){document.getElementById('sb').classList.toggle('open');document.getElementById('sb-ov').classList.toggle('on')}
 function closeSB(){document.getElementById('sb').classList.remove('open');document.getElementById('sb-ov').classList.remove('on')}
+window.addEventListener('scroll',function(){
+  const sb=document.getElementById('sb');
+  if(sb&&sb.classList.contains('open'))closeSB();
+},{passive:true});
 function toResults(){const e=document.getElementById('results');if(e)e.scrollIntoView({behavior:'smooth'})}
 function toInfra(){const e=document.getElementById('infra-section');if(e)e.scrollIntoView({behavior:'smooth'})}
 function showError(m){document.getElementById('error-msg').innerText=m;document.getElementById('error-toast').classList.add('show');setTimeout(hideError,7000)}
