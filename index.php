@@ -1396,6 +1396,8 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
 .inp-ico{position:absolute;left:15px;top:50%;transform:translateY(-50%);color:var(--t3);font-size:13px;pointer-events:none}
 #target{width:100%;background:rgba(4,8,18,.9);border:1px solid var(--border2);border-radius:var(--r12);padding:14px 16px 14px 44px;font-family:var(--mono);font-size:13px;color:var(--t1);outline:none;transition:var(--ease);letter-spacing:.02em}
 #target::placeholder{color:var(--t4)}
+@keyframes inpnudge{0%,100%{box-shadow:0 0 0 0 rgba(6,182,212,0)}20%,60%{box-shadow:0 0 0 4px rgba(6,182,212,.35)}}
+.input-nudge{animation:inpnudge .9s ease}
 #target:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(6,182,212,.07)}
 #btn{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:none;border-radius:var(--r12);padding:14px 26px;font-family:var(--font);font-size:13px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;cursor:pointer;transition:var(--ease);display:flex;align-items:center;gap:8px;white-space:nowrap;flex-shrink:0}
 #btn:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(6,182,212,.3)}
@@ -1824,9 +1826,16 @@ window.addEventListener('scroll',function(){
   const sb=document.getElementById('sb');
   if(sb&&sb.classList.contains('open'))closeSB();
 },{passive:true});
-function toResults(){const e=document.getElementById('results');if(e)e.scrollIntoView({behavior:'smooth'})}
-function toAttackProb(){const e=document.getElementById('attackProbPanel');if(e)e.scrollIntoView({behavior:'smooth'})}
-function toInfra(){const e=document.getElementById('infra-section');if(e)e.scrollIntoView({behavior:'smooth'})}
+function toResults(){const e=document.getElementById('results');if(e&&e.style.display!=='none'){e.scrollIntoView({behavior:'smooth'})}else{noScanYet()}}
+function toAttackProb(){const e=document.getElementById('attackProbPanel');if(e&&e.style.display!=='none'){e.scrollIntoView({behavior:'smooth'})}else{noScanYet()}}
+function toInfra(){const e=document.getElementById('infra-section');const r=document.getElementById('results');if(e&&r&&r.style.display!=='none'){e.scrollIntoView({behavior:'smooth'})}else{noScanYet()}}
+function noScanYet(){
+  closeSB();
+  const t=document.getElementById('target');
+  if(t){t.focus();t.classList.add('input-nudge');setTimeout(()=>t.classList.remove('input-nudge'),900)}
+  document.getElementById('pg').scrollIntoView({behavior:'smooth',block:'start'});
+  showError('Run a scan first — this section fills in once results are ready.');
+}
 function showError(m){document.getElementById('error-msg').innerText=m;document.getElementById('error-toast').classList.add('show');setTimeout(hideError,7000)}
 function hideError(){document.getElementById('error-toast').classList.remove('show')}
 function ctr(el,to,dur=900){const s=performance.now(),f=parseInt(el.innerText)||0;(function run(n){const p=Math.min((n-s)/dur,1),e=1-Math.pow(1-p,3);el.innerText=Math.round(f+(to-f)*e);if(p<1)requestAnimationFrame(run)})(s)}
