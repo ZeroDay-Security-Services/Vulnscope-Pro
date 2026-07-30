@@ -1619,8 +1619,8 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
 #error-msg{font-size:12px;color:var(--t2);line-height:1.45}
 .t-close{background:none;border:none;color:var(--t3);cursor:pointer;font-size:16px;transition:var(--ease);padding:0;line-height:1}
 .t-close:hover{color:var(--t1)}
-#sb-ov{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:199}
-#sb-ov.on{display:block}
+#sb-ov{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:199;opacity:0;pointer-events:none;transition:opacity .28s ease}
+#sb-ov.on{opacity:1;pointer-events:auto}
 /* ============================================================
    RESPONSIVE BREAKPOINTS (v2.0)
    ============================================================ */
@@ -1646,10 +1646,10 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
   </div>
   <nav class="sb-nav">
     <div class="nav-lbl">Platform</div>
-    <a class="nav-a active" href="#" onclick="return false"><i class="fas fa-radar"></i>Scan Console</a>
-    <a class="nav-a" href="#" onclick="toResults();return false"><i class="fas fa-shield-halved"></i>Intelligence Feed</a>
-    <a class="nav-a" href="#" onclick="toAttackProb();return false"><i class="fas fa-chart-simple"></i>Attack Probability</a>
-    <a class="nav-a" href="#" onclick="toInfra();return false"><i class="fas fa-network-wired"></i>Infrastructure Map</a>
+    <a class="nav-a active" id="navScan" href="#" onclick="setActiveNav(this);closeSB();document.getElementById('pg').scrollIntoView({behavior:'smooth',block:'start'});return false"><i class="fas fa-radar"></i>Scan Console</a>
+    <a class="nav-a" id="navFeed" href="#" onclick="setActiveNav(this);toResults();return false"><i class="fas fa-shield-halved"></i>Intelligence Feed</a>
+    <a class="nav-a" id="navAttack" href="#" onclick="setActiveNav(this);toAttackProb();return false"><i class="fas fa-chart-simple"></i>Attack Probability</a>
+    <a class="nav-a" id="navInfra" href="#" onclick="setActiveNav(this);toInfra();return false"><i class="fas fa-network-wired"></i>Infrastructure Map</a>
     <div class="nav-lbl" style="margin-top:6px">Sources</div>
     <a class="nav-a" href="https://nvd.nist.gov/" target="_blank" rel="noopener"><i class="fas fa-database"></i>NVD / NIST</a>
     <a class="nav-a" href="https://www.shodan.io/" target="_blank" rel="noopener"><i class="fas fa-eye"></i>Shodan</a>
@@ -1826,11 +1826,15 @@ window.addEventListener('scroll',function(){
   const sb=document.getElementById('sb');
   if(sb&&sb.classList.contains('open'))closeSB();
 },{passive:true});
-function toResults(){const e=document.getElementById('results');if(e&&e.style.display!=='none'){e.scrollIntoView({behavior:'smooth'})}else{noScanYet()}}
-function toAttackProb(){const e=document.getElementById('attackProbPanel');if(e&&e.style.display!=='none'){e.scrollIntoView({behavior:'smooth'})}else{noScanYet()}}
-function toInfra(){const e=document.getElementById('infra-section');const r=document.getElementById('results');if(e&&r&&r.style.display!=='none'){e.scrollIntoView({behavior:'smooth'})}else{noScanYet()}}
+function setActiveNav(el){document.querySelectorAll('#navScan,#navFeed,#navAttack,#navInfra').forEach(a=>a.classList.remove('active'));el.classList.add('active')}
+function toResults(){closeSB();const e=document.getElementById('results');if(e&&e.style.display!=='none'){setTimeout(()=>e.scrollIntoView({behavior:'smooth'}),260)}else{noScanYet()}}
+function toAttackProb(){closeSB();const e=document.getElementById('attackProbPanel');if(e&&e.style.display!=='none'){setTimeout(()=>e.scrollIntoView({behavior:'smooth'}),260)}else{noScanYet()}}
+function toInfra(){closeSB();const e=document.getElementById('infra-section');const r=document.getElementById('results');if(e&&r&&r.style.display!=='none'){setTimeout(()=>e.scrollIntoView({behavior:'smooth'}),260)}else{noScanYet()}}
 function noScanYet(){
-  closeSB();
+  document.getElementById('navScan').classList.add('active');
+  document.getElementById('navFeed').classList.remove('active');
+  document.getElementById('navAttack').classList.remove('active');
+  document.getElementById('navInfra').classList.remove('active');
   const t=document.getElementById('target');
   if(t){t.focus();t.classList.add('input-nudge');setTimeout(()=>t.classList.remove('input-nudge'),900)}
   document.getElementById('pg').scrollIntoView({behavior:'smooth',block:'start'});
