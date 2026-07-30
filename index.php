@@ -1619,7 +1619,7 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
 #error-msg{font-size:12px;color:var(--t2);line-height:1.45}
 .t-close{background:none;border:none;color:var(--t3);cursor:pointer;font-size:16px;transition:var(--ease);padding:0;line-height:1}
 .t-close:hover{color:var(--t1)}
-#sb-ov{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:199;opacity:0;pointer-events:none;transition:opacity .28s ease}
+#sb-ov{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:150;opacity:0;pointer-events:none;transition:opacity .28s ease}
 #sb-ov.on{opacity:1;pointer-events:auto}
 /* ============================================================
    RESPONSIVE BREAKPOINTS (v2.0)
@@ -1632,7 +1632,6 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
 </head>
 <body>
 <canvas id="bgc"></canvas>
-<div id="sb-ov" onclick="closeSB()"></div>
 <div id="error-toast">
   <div class="t-ico"><i class="fas fa-triangle-exclamation"></i></div>
   <div class="t-body"><div class="t-ttl">Scan Error</div><span id="error-msg"></span></div>
@@ -1673,6 +1672,7 @@ foreach ($_alist as $_ak => $_al):
   </div>
   <div class="sb-footer">VulnScope Pro &bull; Enterprise Security Intelligence<br>Multi-source CVE Correlation Engine</div>
 </aside>
+<div id="sb-ov" onclick="closeSB()"></div>
 <div id="main">
   <header id="topbar">
     <div class="tb-left">
