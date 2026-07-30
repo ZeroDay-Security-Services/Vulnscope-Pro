@@ -1335,7 +1335,7 @@ if (isset($_GET['action'])) {
   --med:#eab308;--med-dim:rgba(234,179,8,0.08);
   --low:#22d3ee;--low-dim:rgba(34,211,238,0.06);
   --info:#64748b;--info-dim:rgba(100,116,139,0.06);
-  --t1:#e2e8f0;--t2:#94a3b8;--t3:#475569;--t4:#1e293b;
+  --t1:#e2e8f0;--t2:#94a3b8;--t3:#7d8ea3;--t4:#5b6b82;
   --border:rgba(30,41,59,0.8);--border2:rgba(51,65,85,0.9);
   --r8:8px;--r12:12px;--r16:16px;--r24:24px;
   --sidebar:260px;--topbar:60px;
