@@ -1,0 +1,14 @@
+# SQLite scan history
+*.sqlite
+*.sqlite3
+*.db
+
+# OS junk
+Thumbs.db
+.DS_Store
+
+# Local env files
+.env
+
+# Tooling workspace
+.freebuff/

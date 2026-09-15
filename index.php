@@ -11,8 +11,8 @@ if (session_status() === PHP_SESSION_NONE) {
  */
 
 defined('DB_PATH')            or define('DB_PATH', 'vulnscope_v2.sqlite');
-defined('SCAN_TOKEN')         or define('SCAN_TOKEN', 'SECURE_SCAN_TOKEN_2024');
-defined('ALLOW_INTERNAL_SCAN') or define('ALLOW_INTERNAL_SCAN', true);
+defined('SCAN_TOKEN')         or define('SCAN_TOKEN', getenv('SCAN_TOKEN') ?: 'SECURE_SCAN_TOKEN_2024');
+defined('ALLOW_INTERNAL_SCAN') or define('ALLOW_INTERNAL_SCAN', filter_var(getenv('ALLOW_INTERNAL_SCAN'), FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) ?? true);
 
 // API keys — loaded from environment variables (set in Render dashboard or .env)
 defined('NVD_API_KEY')      or define('NVD_API_KEY',      getenv('NVD_API_KEY')      ?: '');
@@ -862,6 +862,409 @@ function validate_target(string $target): array|false {
 }
 
 
+/* =========================================================
+   MODULAR PIPELINE — Modules 1-4 (no external binaries)
+   ========================================================= */
+
+/** Quick TLS handshake probe: does <host>:<port> speak TLS? */
+function vs_tls_probe(string $host, int $port, int $timeout = 4): bool {
+    $fp = @fsockopen('ssl://' . $host, $port, $errno, $errstr, $timeout);
+    if ($fp) { fclose($fp); return true; }
+    return false;
+}
+
+/** Extract a named header value from a raw header block. */
+function vs_extract_header(string $raw_headers, string $name): string {
+    if (preg_match('/^' . preg_quote($name, '/') . ':\s*([^\r\n]+)/mi', $raw_headers, $m)) {
+        return trim($m[1]);
+    }
+    return '';
+}
+
+/** SQLi heuristic: scan body for common DB error signatures. */
+function vs_sqli_error_in_body(string $body): bool {
+    $sigs = [
+        'you have an error in your sql syntax', 'warning: mysql',
+        'unclosed quotation mark', 'quoted string not properly terminated',
+        'mysql_fetch_', 'pg_query', 'postgresql query failed', 'psql:',
+        'sql syntax', 'syntax error at or near', 'ora-[0-9]{5}',
+        'odbc.*driver', 'jdbc.*exception',
+    ];
+    foreach ($sigs as $sig) {
+        if (@preg_match('/' . $sig . '/i', $body)) { return true; }
+    }
+    return false;
+}
+
+/** Human-readable SQLi evidence string. */
+function vs_sqli_evidence(string $body): string {
+    foreach (['SQL syntax', 'mysql_fetch_array', 'PostgreSQL query', 'Warning: mysql', 'Unclosed quotation mark', 'ORA-'] as $sig) {
+        if (stripos($body, $sig) !== false) { return "DB error signature: {$sig}"; }
+    }
+    return 'DB error signature match';
+}
+
+/** Inject a payload into the first query param of a URL; null if no params. */
+function vs_inject_param(string $url, string $payload): ?string {
+    $parts = parse_url($url);
+    if (empty($parts['host']) || empty($parts['query'])) { return null; }
+    parse_str($parts['query'], $params);
+    if (!$params) { return null; }
+    $first = array_key_first($params);
+    $params[$first] = $payload;
+    $authority = $parts['host'] . (isset($parts['port']) ? ':' . $parts['port'] : '');
+    return ($parts['scheme'] ?? 'http') . '://' . $authority . ($parts['path'] ?? '/') . '?' . http_build_query($params);
+}
+
+/**
+ * MODULE 1 — Comprehensive Recon (no-Nmap discovery).
+ * Returns: dns, nameservers, ports, banners, whois — structured JSON.
+ */
+function vs_module1_recon(string $host, string $ip): array {
+    $recon = [
+        'host'         => $host,
+        'ip'           => $ip,
+        'timestamp'    => date('c'),
+        'dns'          => ['A' => [], 'AAAA' => [], 'MX' => [], 'TXT' => [], 'CNAME' => [], 'NS' => []],
+        'nameservers'  => [],
+        'ports'        => [],
+        'banners'      => [],
+        'whois'        => null,
+        'errors'       => [],
+    ];
+
+    // ---- DNS: A / AAAA / MX / TXT / CNAME / NS ----
+    foreach (['A' => DNS_A, 'AAAA' => DNS_AAAA, 'MX' => DNS_MX, 'TXT' => DNS_TXT, 'CNAME' => DNS_CNAME, 'NS' => DNS_NS] as $type => $const) {
+        try {
+            $records = @dns_get_record($host, $const);
+            if (!is_array($records)) { $records = []; }
+            foreach ($records as $r) {
+                switch ($type) {
+                    case 'A':
+                        if (!empty($r['ip']))  $recon['dns']['A'][]     = $r['ip'];
+                        break;
+                    case 'AAAA':
+                        if (!empty($r['ipv6'])) $recon['dns']['AAAA'][] = $r['ipv6'];
+                        break;
+                    case 'MX':
+                        if (!empty($r['target'])) $recon['dns']['MX'][] = ['pri' => (int)($r['pri'] ?? 0), 'target' => $r['target']];
+                        break;
+                    case 'TXT':
+                        if (!empty($r['txt'])) $recon['dns']['TXT'][]   = $r['txt'];
+                        break;
+                    case 'CNAME':
+                        if (!empty($r['target'])) $recon['dns']['CNAME'][] = $r['target'];
+                        break;
+                    case 'NS':
+                        if (!empty($r['target'])) $recon['nameservers'][] = $r['target'];
+                        break;
+                }
+            }
+        } catch (Throwable $e) {
+            $recon['errors'][] = "DNS {$type}: " . $e->getMessage();
+        }
+    }
+    if ($recon['dns']['A'] === [] && $host === $ip) { $recon['dns']['A'][] = $ip; }
+    $recon['dns']['NS'] = array_values(array_unique($recon['nameservers']));
+
+    // ---- Port scan + banner grab (php_socket_scan engine, Nmap-XML output) ----
+    try {
+        $scan_xml = @simplexml_load_string(php_socket_scan($host, $ip));
+        if ($scan_xml) {
+            foreach ($scan_xml->host->ports->port as $p) {
+                $portId  = (string)$p['portid'];
+                $product = (string)($p->service['product'] ?? '');
+                $version = (string)($p->service['version'] ?? '');
+                $recon['ports'][] = [
+                    'port'    => $portId,
+                    'state'   => (string)($p->state['state'] ?? 'unknown'),
+                    'service' => (string)($p->service['name'] ?? 'unknown'),
+                    'product' => $product,
+                    'version' => $version,
+                ];
+                if ($version !== '') {
+                    $recon['banners'][] = ['port' => $portId, 'banner' => $version];
+                }
+            }
+        }
+    } catch (Throwable $e) {
+        $recon['errors'][] = 'Port scan: ' . $e->getMessage();
+    }
+
+    // ---- Native whois via IANA referral chain (raw socket) ----
+    try {
+        $recon['whois'] = vs_native_whois($host);
+    } catch (Throwable $e) {
+        $recon['errors'][] = 'Whois: ' . $e->getMessage();
+    }
+
+    return $recon;
+}
+
+/**
+ * Raw-socket whois: IANA -> registrar referral chain, parsed into structured fields.
+ */
+function vs_native_whois(string $domain): ?array {
+    $req = function (string $server, string $query, int $timeout = 8): string {
+        $fp = @fsockopen($server, 43, $errno, $errstr, $timeout);
+        if (!$fp) { throw new Exception("whois {$server}: {$errstr}"); }
+        stream_set_timeout($fp, $timeout);
+        fwrite($fp, $query . "\r\n");
+        $out = '';
+        while (!feof($fp)) { $out .= fgets($fp, 4096); }
+        fclose($fp);
+        return $out;
+    };
+
+    $grab = function (string $raw) use ($req): array {
+        $data = [];
+        $patterns = [
+            'domain_name'   => '/Domain Name:\s*(.+)/i',
+            'registrar'     => '/Registrar:\s*(.+)/i',
+            'registrar_url' => '/Registrar URL:\s*(.+)/i',
+            'registrar_abuse_email' => '/Abuse Contact Email:\s*(.+)/i',
+            'creation_date' => '/Creation Date:\s*(.+)/i',
+            'updated_date'  => '/Updated Date:\s*(.+)/i',
+            'expiry_date'   => '/Registry Expiry Date:\s*(.+)/i',
+            'dnssec'        => '/DNSSEC:\s*(.+)/i',
+            'status'        => '/Domain Status:\s*(.+)/i',
+            'name_servers'  => '/Name Server:\s*(.+)/i',
+        ];
+        foreach ($patterns as $key => $re) {
+            if ($key === 'name_servers') {
+                if (preg_match_all($re, $raw, $m)) { $data[$key] = array_map('trim', array_unique($m[1])); }
+            } elseif (preg_match($re, $raw, $m)) {
+                $data[$key] = trim($m[1]);
+            }
+        }
+        return $data;
+    };
+
+    $raw = $req('whois.iana.org', $domain);
+    $referral = null;
+    if (preg_match('/refer:\s*(\S+)/i', $raw, $m)) {
+        $referral = $m[1];
+    } elseif (preg_match('/whois:\s*(\S+)/i', $raw, $m)) {
+        $referral = $m[1];
+    } elseif (preg_match('/Whois Server:\s*(\S+)/i', $raw, $m)) {
+        $referral = $m[1];
+    }
+    $ianaData = $grab($raw);
+    if (!$referral) { return $ianaData ?: null; }
+
+    $regRaw = $req($referral, $domain);
+    $regData = $grab($regRaw);
+    return array_merge($ianaData, $regData);
+}
+
+/**
+ * MODULE 2 — Web directory / file bruteforcer (curl_multi, threaded equivalent).
+ * Probes high-value paths: .env, .git, config.php, backup archives, /admin, etc.
+ */
+function vs_module2_fuzz(string $host, int $port, bool $tls, int $max_conc = 20): array {
+    $base = ($tls ? 'https' : 'http') . "://{$host}:{$port}";
+    $targets = [
+        '.env', '.env.bak', '.git/HEAD', '.git/config', '.svn/entries', '.DS_Store',
+        'config.php', 'configuration.php', 'wp-config.php', 'settings.py', 'database.yml',
+        'backup.zip', 'backup.tar.gz', 'site.tar.gz', 'dump.sql', 'db.sqlite3',
+        'admin', 'admin/', 'admin.php', 'administrator', 'phpmyadmin/', 'wp-admin/',
+        'robots.txt', 'sitemap.xml', 'composer.json', 'package.json', '.htaccess',
+        'web.config', 'server-status', 'phpinfo.php', 'info.php', 'cgi-bin/',
+        'uploads/', 'tmp/', 'backup/', 'old/', 'test/', 'api/', '.well-known/security.txt',
+    ];
+    $results  = [];
+    $queue    = $targets;
+    $deadline = microtime(true) + 25.0;   // hard ceiling for whole probe run
+
+    while ($queue && microtime(true) < $deadline) {
+        $batch = array_splice($queue, 0, $max_conc);
+        $mh = curl_multi_init();
+        $handles = [];
+        foreach ($batch as $path) {
+            $url = $base . '/' . ltrim($path, '/');
+            $ch = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_HEADER         => true,
+                CURLOPT_NOBODY         => false,
+                CURLOPT_TIMEOUT_MS     => 5000,
+                CURLOPT_CONNECTTIMEOUT_MS => 3000,
+                CURLOPT_FOLLOWLOCATION => false,
+                CURLOPT_SSL_VERIFYPEER => false,
+                CURLOPT_SSL_VERIFYHOST => 0,
+            ]);
+            curl_multi_add_handle($mh, $ch);
+            $handles[$path] = $ch;
+        }
+        do {
+            curl_multi_exec($mh, $running);
+            if (microtime(true) > $deadline) { break; }
+            curl_multi_select($mh, 0.2);
+        } while ($running > 0);
+
+        foreach ($handles as $path => $ch) {
+            $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            $size = (int)curl_getinfo($ch, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T);
+            $resp = curl_multi_getcontent($ch);
+            if ($size === -1 || $size === 0) {
+                $size = is_string($resp) ? strlen($resp) : 0;
+            }
+            $hdr = is_string($resp) ? substr($resp, 0, 4096) : '';
+            curl_multi_remove_handle($mh, $ch);
+            curl_close($ch);
+            // Interesting = anything that is NOT the soft-404 signature (404 + empty body)
+            if ($code > 0 && !($code === 404 && $size === 0)) {
+                $results[] = ['path' => '/' . ltrim($path, '/'), 'status' => $code, 'length' => $size, 'server_header' => vs_extract_header($hdr, 'Server')];
+            }
+        }
+        curl_multi_close($mh);
+    }
+
+    usort($results, fn($a, $b) => ($a['status'] <=> $b['status']) ?: strcmp($a['path'], $b['path']));
+    return ['base_url' => $base, 'paths_tested' => count($targets), 'hits' => $results];
+}
+
+/**
+ * MODULE 3 — Active payload scanner (thread-safe injection tester).
+ * SQLi / XSS / LFI / Open-Redirect validations against discovered GET inputs.
+ */
+function vs_module3_payloads(string $host, int $port, bool $tls, array $probe_paths = []): array {
+    $scheme = $tls ? 'https' : 'http';
+    $base   = "{$scheme}://{$host}:{$port}";
+    $tests  = [];
+
+    /** Single lightweight GET, no redirect-follow, returns [status, body, headers]. */
+    $http = function (string $url) use ($base): array {
+        $ch = curl_init($url);
+        curl_setopt_array($ch, [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_HEADER         => true,
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_TIMEOUT_MS     => 6000,
+            CURLOPT_CONNECTTIMEOUT_MS => 3000,
+            CURLOPT_SSL_VERIFYPEER => false,
+            CURLOPT_SSL_VERIFYHOST => 0,
+            CURLOPT_USERAGENT      => 'Mozilla/5.0 (VulnScope PayloadScanner)',
+        ]);
+        $raw = curl_exec($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if (!is_string($raw)) { return [$code, '', '']; }
+        $sep = strpos($raw, "\r\n\r\n");
+        return [$code, $sep !== false ? substr($raw, $sep + 4) : $raw, substr($raw, 0, $sep ?: 0)];
+    };
+
+    /** Grab candidate GET param URLs from a page's forms + query links. */
+    $collect = function (string $url) use ($http): array {
+        [$code, $body] = $http($url);
+        $cands = [];
+        if ($code !== 200 || !$body) { return $cands; }
+        // query-string links
+        if (preg_match_all('/href=["\']([^"\']+\?[^"\']+["\'])/i', $body, $m)) {
+            foreach ($m[1] as $u) { $cands[] = html_entity_decode($u, ENT_QUOTES); }
+        }
+        // form actions with GET params
+        if (preg_match_all('/<form[^>]+action=["\']([^"\']*)["\'][^>]*>/is', $body, $fm)) {
+            foreach ($fm[1] as $act) { $cands[] = html_entity_decode($act, ENT_QUOTES); }
+        }
+        // bare ?a=b&c=d URLs anywhere in the markup
+        if (preg_match_all('/[?&][a-zA-Z_][a-zA-Z0-9_]*=[^"\'\s>]+/', $body, $qm)) {
+            $cands = array_merge($cands, $qm[0]);
+        }
+        return array_slice(array_values(array_unique($cands)), 0, 6);
+    };
+
+    $payloads = [
+        ['type' => 'sqli',     'payload' => "'"],
+        ['type' => 'sqli2',    'payload' => "' OR '1'='1"],
+        ['type' => 'xss',      'payload' => '"><xsstester>'],
+        ['type' => 'lfi',      'payload' => '../../../../etc/passwd'],
+        ['type' => 'redirect', 'payload' => 'https://google.com'],
+    ];
+    $deadline = microtime(true) + 60.0;
+    foreach (($probe_paths ?: ['/']) as $pp) {
+        $url0 = $base . '/' . ltrim($pp, '/');
+        [$code0, $body0] = $http($url0);
+        if ($code0 !== 200 || !$body0) { continue; }
+        $cands = $collect($url0);          // extract param URLs
+        foreach ($cands as $cu) {
+            if (microtime(true) > $deadline) { break 2; }
+            foreach ($payloads as $t) {
+                $turl = vs_inject_param($cu, $t['payload']);
+                if ($turl === null) { continue; }
+                [$code, $body, $hdrs] = $http($turl);
+                $verdict = false;
+                $evidence = '';
+                switch ($t['type']) {
+                    case 'sqli':
+                    case 'sqli2':
+                        $verdict = vs_sqli_error_in_body($body);
+                        if ($verdict) { $evidence = vs_sqli_evidence($body); }
+                        break;
+                    case 'xss':
+                        $verdict = strpos($body, '"><xsstester>') !== false;
+                        if ($verdict) { $evidence = 'Unencoded payload echoed in response body.'; }
+                        break;
+                    case 'lfi':
+                        $verdict = (bool)preg_match('/root:[x*!]?:[0-9:]+:[0-9:]+:[^:]*:\/root:\/bin\/(ba)?sh/i', $body);
+                        if ($verdict) { $evidence = 'passwd-file structure present in body.'; }
+                        break;
+                    case 'redirect':
+                        $isRedir = in_array($code, [301, 302], true);
+                        $loc     = vs_extract_header($hdrs, 'Location');
+                        $verdict = $isRedir && $loc && stripos($loc, 'google.com') !== false;
+                        if ($verdict) { $evidence = 'Redirect to ' . $loc; }
+                        break;
+                }
+                $tests[] = [
+                    'url'      => $turl,
+                    'param'    => $t['type'] === 'redirect' ? 'redirect param' : $t['type'],
+                    'payload'  => $t['payload'],
+                    'vulnerable' => $verdict,
+                    'evidence' => $evidence,
+                    'status'   => $code,
+                ];
+            }
+        }
+    }
+    return ['base_url' => $base, 'tests_run' => count($tests), 'vulnerabilities' => $tests];
+}
+
+/**
+ * MODULE 4 — UI/Frontend API Export Layer.
+ * Normalizes all module output into the report envelope the frontend consumes.
+ */
+function vs_module4_export(array $module1, array $module2, array $module3, string $host, string $ip, int $risk): array {
+    $findings = [];
+    foreach ($module3['vulnerabilities'] ?? [] as $v) {
+        if (!($v['vulnerable'] ?? false)) { continue; }
+        $findings[] = [
+            'id'          => 'VSP-' . strtoupper(substr(md5($v['url'] . $v['payload']), 0, 8)),
+            'cvss'        => 0.0,
+            'severity'    => 'High',
+            'summary'     => "{$v['type']} injection confirmed: {$v['evidence']}",
+            'source'      => 'Module 3 Payload Scanner',
+            'vector'      => '',
+            'cwe'         => '',
+            'published'   => '',
+            'port'        => '',
+            'affected_service' => $v['url'],
+        ];
+    }
+    return [
+        'success'  => true,
+        'modules'  => ['recon' => $module1, 'fuzz' => $module2, 'payloads' => $module3],
+        'findings' => $findings,
+        'summary'  => ['target' => $host, 'ip' => $ip, 'risk_score' => $risk],
+        'exported_at' => date('c'),
+    ];
+}
+
+/* =========================================================
+   END MODULAR PIPELINE
+   ========================================================= */
+
+
 if (isset($_GET['action'])) {
     header('Content-Type: application/json');
     header('X-Content-Type-Options: nosniff');
@@ -1311,6 +1714,153 @@ if (isset($_GET['action'])) {
         }
         exit;
     }
+
+    /* ---- action=recon — MODULE 1 standalone ---- */
+    if ($_GET['action'] === 'recon') {
+        try {
+            $target_raw  = trim($_POST['target'] ?? '');
+            $validation  = validate_target($target_raw);
+            if (!$validation) throw new Exception('Invalid or unreachable target.');
+            $host = $validation['host']; $ip = $validation['ip'];
+            echo json_encode(['success' => true, 'recon' => vs_module1_recon($host, $ip)], JSON_UNESCAPED_UNICODE);
+        } catch (Throwable $e) {
+            http_response_code(500);
+            echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+        }
+        exit;
+    }
+
+    /* ---- action=fuzz — MODULE 2 standalone ---- */
+    if ($_GET['action'] === 'fuzz') {
+        try {
+            $target_raw  = trim($_POST['target'] ?? '');
+            $validation  = validate_target($target_raw);
+            if (!$validation) throw new Exception('Invalid or unreachable target.');
+            $host = $validation['host']; $ip = $validation['ip'];
+            $port = (int)($_POST['port'] ?? 0);
+            $tls  = $port === 443 || $port === 8443 || ($port === 0 && vs_tls_probe($host, 443));
+            if ($port === 0) { $port = $tls ? 443 : 80; }
+            echo json_encode(['success' => true, 'fuzz' => vs_module2_fuzz($host, $port, $tls)], JSON_UNESCAPED_UNICODE);
+        } catch (Throwable $e) {
+            http_response_code(500);
+            echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+        }
+        exit;
+    }
+
+    /* ---- action=payloads — MODULE 3 standalone ---- */
+    if ($_GET['action'] === 'payloads') {
+        try {
+            $target_raw  = trim($_POST['target'] ?? '');
+            $validation  = validate_target($target_raw);
+            if (!$validation) throw new Exception('Invalid or unreachable target.');
+            $host = $validation['host']; $ip = $validation['ip'];
+            $port = (int)($_POST['port'] ?? 0);
+            $tls  = $port === 443 || $port === 8443 || ($port === 0 && vs_tls_probe($host, 443));
+            if ($port === 0) { $port = $tls ? 443 : 80; }
+            $paths = array_filter(array_map('trim', explode("\n", (string)($_POST['paths'] ?? ''))));
+            echo json_encode(['success' => true, 'payload_scan' => vs_module3_payloads($host, $port, $tls, $paths)], JSON_UNESCAPED_UNICODE);
+        } catch (Throwable $e) {
+            http_response_code(500);
+            echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+        }
+        exit;
+    }
+
+    /* ---- action=full — full modular pipeline (M1 -> M2 -> M3 -> M4) ---- */
+    if ($_GET['action'] === 'full') {
+        try {
+            $t0 = microtime(true);
+            $target_raw  = trim($_POST['target'] ?? '');
+            $validation  = validate_target($target_raw);
+            if (!$validation) throw new Exception('Invalid or unreachable target.');
+            $host = $validation['host']; $ip = $validation['ip'];
+
+            // ---- MODULE 1: recon ----
+            $module1 = vs_module1_recon($host, $ip);
+
+            // pick a web port (prefer 80/443, else first HTTP-ish open port)
+            $web_port = 0; $tls = false;
+            foreach ($module1['ports'] as $p) {
+                if (in_array((int)$p['port'], [80, 443, 8080, 8443, 8008, 8888, 3000, 5000], true)) {
+                    $web_port = (int)$p['port'];
+                    $tls      = in_array($web_port, [443, 8443], true);
+                    break;
+                }
+            }
+            if ($web_port === 0) {
+                $tls = vs_tls_probe($host, 443);
+                $web_port = $tls ? 443 : 80;
+            }
+
+            // ---- MODULE 2: directory fuzz ----
+            $module2 = vs_module2_fuzz($host, $web_port, $tls);
+
+            // probe the paths Module 2 found (200s first)
+            $probe_paths = [];
+            foreach ($module2['hits'] as $h) {
+                if ($h['status'] === 200) { $probe_paths[] = $h['path']; }
+            }
+            $probe_paths = array_slice($probe_paths, 0, 5);
+
+            // ---- MODULE 3: payload scan ----
+            $module3 = vs_module3_payloads($host, $web_port, $tls, $probe_paths);
+
+            // ---- MODULE 4: export envelope ----
+            $response = vs_module4_export($module1, $module2, $module3, $host, $ip, 0);
+            $risk = calculate_risk_score($response['findings'], count($module1['ports']));
+            $response['summary']['risk_score'] = $risk;
+            $response['summary']['web_port'] = $web_port;
+            $response['summary']['scan_engine'] = 'Modular Pipeline (no external binaries)';
+            $response['summary']['duration_ms'] = (int)((microtime(true) - $t0) * 1000);
+
+            /* ---- persist ---- */
+            if ($db) {
+                try {
+                    $stmt = $db->prepare(
+                        'INSERT INTO scans (target, ip_address, risk_score, nmap_output, intelligence_data, vulnerabilities)
+                         VALUES (?, ?, ?, ?, ?, ?)'
+                    );
+                    $stmt->execute([
+                        $host, $ip, $risk,
+                        json_encode($module1['ports']),
+                        json_encode(['recon' => $module1, 'fuzz' => $module2, 'payloads' => $module3]),
+                        json_encode($response['findings']),
+                    ]);
+                } catch (Exception $e) { error_log('DB insert (full): ' . $e->getMessage()); }
+            }
+
+            echo json_encode($response, JSON_UNESCAPED_UNICODE);
+        } catch (Throwable $e) {
+            http_response_code(500);
+            echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+        }
+        exit;
+    }
+
+    /* ---- action=export — MODULE 4 raw envelope for last stored pipeline run ---- */
+    if ($_GET['action'] === 'export') {
+        try {
+            if (!$db) throw new Exception('Database unavailable.');
+            $stmt = $db->prepare('SELECT intelligence_data, vulnerabilities, target, ip_address, risk_score FROM scans WHERE target = ? ORDER BY id DESC LIMIT 1');
+            $stmt->execute([trim($_GET['target'] ?? '')]);
+            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (!$row) throw new Exception('No stored scan for this target.');
+            echo json_encode([
+                'success'       => true,
+                'target'        => $row['target'],
+                'ip'            => $row['ip_address'],
+                'risk_score'    => (int)$row['risk_score'],
+                'intelligence'  => json_decode($row['intelligence_data'], true),
+                'findings'      => json_decode($row['vulnerabilities'], true),
+                'exported_at'   => date('c'),
+            ], JSON_UNESCAPED_UNICODE);
+        } catch (Throwable $e) {
+            http_response_code(500);
+            echo json_encode(['success' => false, 'message' => $e->getMessage()]);
+        }
+        exit;
+    }
 }
 
 ?>
@@ -1628,6 +2178,36 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
 @media(max-width:768px){#pg{padding:14px}.scan-panel{padding:20px 18px}.scan-ph h1{font-size:16px}.scan-row{flex-direction:column}#btn{width:100%;justify-content:center}.stats{grid-template-columns:repeat(2,1fr);gap:10px}.sc-val{font-size:28px}#portGrid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr))}.tb-pill:last-child{display:none}.res-hdr{flex-direction:column;align-items:flex-start}.sif-toolbar{flex-direction:column}.sif-search-wrap{min-width:100%}.vc-hdr{flex-wrap:wrap;gap:6px}.vc-chips{gap:4px}.ap-bar-label{width:90px;font-size:8px}.ap-charts{grid-template-columns:1fr}}
 @media(max-width:480px){:root{--topbar:54px}#pg{padding:10px}.scan-panel{padding:16px 14px;border-radius:var(--r16)}.eng-badge{display:none}.stats{grid-template-columns:1fr 1fr;gap:8px}.sc{padding:14px 16px}.sc-val{font-size:24px}.sc.ip .sc-val{font-size:12px}#vulnList{padding:10px 12px;max-height:none}#portGrid{grid-template-columns:1fr 1fr;padding:10px 12px}.panel-hdr{padding:12px 14px}.panel-body{padding:14px}.vc-visible{padding:6px 12px 10px}.ap-bar-row{flex-wrap:wrap;gap:4px}.ap-bar-label{width:100%;font-size:9px}.ap-bar-class{display:none}}
 @media(max-width:360px){.stats{grid-template-columns:1fr}#portGrid{grid-template-columns:1fr}}
+/* ============================================================
+   MODULAR PIPELINE UI (Modules 1-4)
+   ============================================================ */
+.scan-mode{background:rgba(255,255,255,.03);border:1px solid var(--border2);border-radius:var(--r8);color:var(--t1);font-family:var(--mono);font-size:11px;padding:0 10px;height:38px;cursor:pointer;outline:none;transition:var(--ease)}
+.scan-mode:focus{border-color:var(--accent-border);box-shadow:0 0 0 2px var(--accent-glow)}
+.scan-mode option{background:#0a121e;color:var(--t1)}
+.vs-panel{display:none}.vs-panel.show{display:block;animation:cin .3s ease both}
+.vs-table{width:100%;border-collapse:collapse;font-size:11px}
+.vs-table th{font-family:var(--mono);font-size:8.5px;text-transform:uppercase;letter-spacing:.12em;color:var(--t4);text-align:left;padding:8px 14px;border-bottom:1px solid var(--border)}
+.vs-table td{padding:7px 14px;border-bottom:1px solid rgba(30,41,59,.4);font-family:var(--mono);font-size:10.5px;color:var(--t2);vertical-align:top}
+.vs-table tr:last-child td{border-bottom:none}
+.vs-table tbody tr:hover td{background:rgba(6,182,212,.03)}
+.st-pill{font-size:9px;font-weight:700;font-family:var(--mono);padding:2px 7px;border-radius:4px;letter-spacing:.05em;white-space:nowrap}
+.st-200{color:#22c55e;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2)}
+.st-3xx{color:#3b82f6;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.2)}
+.st-403{color:var(--warn);background:var(--warn-dim);border:1px solid rgba(249,115,22,.25)}
+.st-404{color:var(--t4);background:rgba(100,116,139,.08);border:1px solid rgba(100,116,139,.2)}
+.st-err{color:var(--danger);background:var(--danger-dim);border:1px solid var(--danger-border)}
+.vuln-hit{padding:12px 14px;border:1px solid var(--danger-border);background:var(--danger-dim);border-radius:var(--r12);margin:10px 14px;animation:cin .25s ease both}
+.vh-h{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.vh-type{font-size:10px;font-weight:800;font-family:var(--mono);color:var(--danger);text-transform:uppercase;letter-spacing:.1em}
+.vh-url{font-size:10px;font-family:var(--mono);color:var(--t2);word-break:break-all;margin-bottom:4px}
+.vh-ev{font-size:10px;font-family:var(--mono);color:var(--warn)}
+.recon-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;padding:14px 16px}
+.recon-cell{background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:var(--r12);padding:12px}
+.recon-cell h4{font-size:9px;font-weight:700;font-family:var(--mono);color:var(--accent);text-transform:uppercase;letter-spacing:.12em;margin-bottom:8px}
+.recon-cell .rc-v{font-family:var(--mono);font-size:10px;color:var(--t2);line-height:1.7;word-break:break-all}
+.rc-dim{color:var(--t4);font-size:9px}
+.whois-pre{max-height:280px;overflow:auto;padding:14px 16px;margin:0;font-family:var(--mono);font-size:10px;line-height:1.8;color:var(--t2);white-space:pre-wrap;word-break:break-word}
+@media(max-width:768px){.recon-grid{grid-template-columns:1fr}.scan-mode{width:100%;height:36px}}
 </style>
 </head>
 <body>
@@ -1649,6 +2229,10 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
     <a class="nav-a" id="navFeed" href="#" onclick="setActiveNav(this);toResults();return false"><i class="fas fa-shield-halved"></i>Intelligence Feed</a>
     <a class="nav-a" id="navAttack" href="#" onclick="setActiveNav(this);toAttackProb();return false"><i class="fas fa-chart-simple"></i>Attack Probability</a>
     <a class="nav-a" id="navInfra" href="#" onclick="setActiveNav(this);toInfra();return false"><i class="fas fa-network-wired"></i>Infrastructure Map</a>
+    <div class="nav-lbl" style="margin-top:6px">Modules</div>
+    <a class="nav-a" id="navRecon" href="#" onclick="setActiveNav(this);toPanel('reconPanel');return false"><i class="fas fa-satellite"></i>M1 Recon</a>
+    <a class="nav-a" id="navFuzz" href="#" onclick="setActiveNav(this);toPanel('fuzzPanel');return false"><i class="fas fa-folder-tree"></i>M2 Fuzzer</a>
+    <a class="nav-a" id="navPayload" href="#" onclick="setActiveNav(this);toPanel('payloadPanel');return false"><i class="fas fa-syringe"></i>M3 Payloads</a>
     <div class="nav-lbl" style="margin-top:6px">Sources</div>
     <a class="nav-a" href="https://nvd.nist.gov/" target="_blank" rel="noopener"><i class="fas fa-database"></i>NVD / NIST</a>
     <a class="nav-a" href="https://www.shodan.io/" target="_blank" rel="noopener"><i class="fas fa-eye"></i>Shodan</a>
@@ -1702,6 +2286,13 @@ foreach ($_alist as $_ak => $_al):
             <input type="text" id="target" placeholder="Target IP or domain  e.g. 192.168.1.1 or example.com" autocomplete="off" spellcheck="false">
             <i class="fas fa-crosshairs inp-ico"></i>
           </div>
+          <select id="scanMode" class="scan-mode" aria-label="Scan mode">
+            <option value="full">Full Pipeline (M1&ndash;M4)</option>
+            <option value="scan">CVE Intelligence (legacy)</option>
+            <option value="recon">M1 &mdash; Recon</option>
+            <option value="fuzz">M2 &mdash; Dir Fuzzer</option>
+            <option value="payloads">M3 &mdash; Payloads</option>
+          </select>
           <button type="submit" id="btn"><i class="fas fa-shield-virus"></i>Launch Assessment</button>
         </div>
       </form>
@@ -1805,6 +2396,37 @@ foreach ($_alist as $_ak => $_al):
         </div>
         <div id="portGrid"></div>
       </div>
+      <!-- MODULE 1: Recon -->
+      <div class="panel vs-panel" id="reconPanel" style="margin-bottom:0">
+        <div class="panel-hdr">
+          <div class="panel-title"><i class="fas fa-satellite"></i>Module 1 &mdash; Recon (DNS / NS / Ports / Banners / Whois)</div>
+          <span class="tb-pill" style="font-size:9px;font-family:var(--mono)">native sockets &mdash; no external binaries</span>
+        </div>
+        <div class="recon-grid" id="reconGrid"></div>
+        <div class="panel-hdr" style="border-top:1px solid var(--border)"><div class="panel-title" style="font-size:11px"><i class="fas fa-file-lines"></i>Raw Whois (IANA referral chain)</div></div>
+        <pre class="whois-pre" id="whoisOut">No data.</pre>
+      </div>
+      <!-- MODULE 2: Fuzzer -->
+      <div class="panel vs-panel" id="fuzzPanel" style="margin-bottom:0">
+        <div class="panel-hdr">
+          <div class="panel-title"><i class="fas fa-folder-tree"></i>Module 2 &mdash; Directory &amp; Sensitive File Fuzzer</div>
+          <span id="fuzzMeta" style="font-size:10px;font-family:var(--mono);color:var(--t3)"></span>
+        </div>
+        <div style="max-height:420px;overflow-y:auto">
+          <table class="vs-table">
+            <thead><tr><th>Status</th><th>Path</th><th>Content-Length</th><th>Server</th></tr></thead>
+            <tbody id="fuzzRows"><tr><td colspan="4" class="rc-dim">No data.</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <!-- MODULE 3: Payload scanner -->
+      <div class="panel vs-panel" id="payloadPanel" style="margin-bottom:0">
+        <div class="panel-hdr">
+          <div class="panel-title"><i class="fas fa-syringe"></i>Module 3 &mdash; Active Payload Scanner (SQLi / XSS / LFI / Open Redirect)</div>
+          <span id="payloadMeta" style="font-size:10px;font-family:var(--mono);color:var(--t3)"></span>
+        </div>
+        <div id="payloadHits"><div class="empty-s" style="padding:20px"><span>No injection validations ran.</span></div></div>
+      </div>
     </div>
   </main>
 </div>
@@ -1826,7 +2448,7 @@ window.addEventListener('scroll',function(){
   const sb=document.getElementById('sb');
   if(sb&&sb.classList.contains('open'))closeSB();
 },{passive:true});
-function setActiveNav(el){document.querySelectorAll('#navScan,#navFeed,#navAttack,#navInfra').forEach(a=>a.classList.remove('active'));el.classList.add('active')}
+function setActiveNav(el){document.querySelectorAll('#navScan,#navFeed,#navAttack,#navInfra,#navRecon,#navFuzz,#navPayload').forEach(a=>a.classList.remove('active'));el.classList.add('active')}
 function toResults(){closeSB();const e=document.getElementById('results');if(e&&e.style.display!=='none'){setTimeout(()=>e.scrollIntoView({behavior:'smooth'}),260)}else{noScanYet()}}
 function toAttackProb(){closeSB();const e=document.getElementById('attackProbPanel');if(e&&e.style.display!=='none'){setTimeout(()=>e.scrollIntoView({behavior:'smooth'}),260)}else{noScanYet()}}
 function toInfra(){closeSB();const e=document.getElementById('infra-section');const r=document.getElementById('results');if(e&&r&&r.style.display!=='none'){setTimeout(()=>e.scrollIntoView({behavior:'smooth'}),260)}else{noScanYet()}}
@@ -1849,19 +2471,81 @@ function startLdr(){_lm=0;updLdr();_lt=setInterval(updLdr,2600)}
 function updLdr(){const el=document.getElementById('ldtxt');if(el)el.innerHTML='<i class="fas fa-circle-notch fa-spin" style="margin-right:6px"></i>'+LDR_MSGS[_lm%LDR_MSGS.length];_lm++}
 function stopLdr(){clearInterval(_lt)}
 function riskMeta(s){if(s>=80)return['Critical Risk','r-critical'];if(s>=60)return['High Risk','r-high'];if(s>=40)return['Medium Risk','r-medium'];if(s>=15)return['Low Risk','r-low'];return['Minimal Risk','r-info']}
+/* ---- Modular pipeline renderers (Modules 1-4) ---- */
+function _vsReset(){
+  for(const id of ['reconPanel','fuzzPanel','payloadPanel']){const el=document.getElementById(id);if(el)el.classList.remove('show')}
+  document.getElementById('whoisOut').textContent='No data.';
+  document.getElementById('fuzzRows').innerHTML='<tr><td colspan="4" class="rc-dim">No data.</td></tr>';
+  document.getElementById('fuzzMeta').textContent='';
+  document.getElementById('payloadMeta').textContent='';
+  document.getElementById('payloadHits').innerHTML='<div class="empty-s" style="padding:20px"><span>No injection validations ran.</span></div>';
+  document.getElementById('reconGrid').innerHTML='';
+}
+function toPanel(id){closeSB();const p=document.getElementById(id),r=document.getElementById('results');if(p&&r&&r.style.display!=='none'&&p.classList.contains('show')){setTimeout(()=>p.scrollIntoView({behavior:'smooth'}),260)}else{noScanYet()}}
+function _vsPill(code){const c=parseInt(code)||0;let cls='st-err';if(c>=200&&c<300)cls='st-200';else if(c>=300&&c<400)cls='st-3xx';else if(c===403)cls='st-403';else if(c===404)cls='st-404';return `<span class="st-pill ${cls}">${c||'ERR'}</span>`}
+function renderRecon(rc){
+  const d=rc.dns||{};
+  const cell=(h,v)=>`<div class="recon-cell"><h4>${h}</h4><div class="rc-v">${v||'<span class="rc-dim">none</span>'}</div></div>`;
+  let html='';
+  html+=cell('A Records',(d.A||[]).join('<br>'));
+  html+=cell('AAAA Records',(d.AAAA||[]).join('<br>'));
+  html+=cell('MX Records',(d.MX||[]).map(m=>`${m.pri} &middot; ${m.target}`).join('<br>'));
+  html+=cell('TXT Records',(d.TXT||[]).map(t=>t.length>90?t.slice(0,90)+'&hellip;':t).join('<br>'));
+  html+=cell('Nameservers',(rc.nameservers||[]).join('<br>'));
+  html+=cell('Open Ports &amp; Banners',(rc.ports||[]).map(p=>`:${p.port} ${p.service}${p.product?' &mdash; '+p.product:''}${p.version?' '+p.version:''}`).join('<br>'));
+  if((rc.errors||[]).length)html+=cell('Module Errors',rc.errors.map(e=>`<span class="vh-ev">${e}</span>`).join('<br>'));
+  document.getElementById('reconGrid').innerHTML=html;
+  const w=rc.whois;
+  let out='No whois data (registry unreachable or TLD unsupported).';
+  if(w){out=Object.entries(w).map(([k,v])=>Array.isArray(v)?k.toUpperCase()+':\n  '+v.join('\n  '):k.toUpperCase()+': '+v).join('\n')}
+  document.getElementById('whoisOut').textContent=out;
+  document.getElementById('reconPanel').classList.add('show');
+}
+function renderFuzz(fz){
+  const hits=fz.hits||[];
+  document.getElementById('fuzzRows').innerHTML=hits.length?hits.map(h=>`<tr><td>${_vsPill(h.status)}</td><td>${h.path}</td><td>${h.length}</td><td>${h.server_header||'&mdash;'}</td></tr>`).join(''):'<tr><td colspan="4" class="rc-dim">No interesting paths found.</td></tr>';
+  document.getElementById('fuzzMeta').textContent=`${hits.length} hits / ${fz.paths_tested||0} probed · ${fz.base_url||''}`;
+  document.getElementById('fuzzPanel').classList.add('show');
+}
+function renderPayloads(ps){
+  const all=ps.vulnerabilities||[],hits=all.filter(v=>v.vulnerable);
+  document.getElementById('payloadHits').innerHTML=hits.length?hits.map(v=>`<div class="vuln-hit"><div class="vh-h"><span class="vh-type">${v.type}</span><span class="st-pill st-200">VULNERABLE</span></div><div class="vh-url">${v.url}</div><div class="vh-ev"><i class="fas fa-vial" style="margin-right:6px"></i>${v.evidence||'&mdash;'}</div></div>`).join(''):'<div class="empty-s" style="padding:20px"><span>No confirmed injection points (heuristic scan).</span></div>';
+  document.getElementById('payloadMeta').textContent=`${all.length} tests · ${hits.length} confirmed · ${ps.base_url||''}`;
+  document.getElementById('payloadPanel').classList.add('show');
+}
+function renderDashboardShell(resp){
+  const s=resp.summary||{};
+  const re=document.getElementById('results');re.style.display='block';re.classList.add('show');
+  const rs=s.risk_score||0;
+  ctr(document.getElementById('riskValue'),rs,1100);
+  setTimeout(()=>document.getElementById('riskBar').style.width=rs+'%',90);
+  document.getElementById('resTarget').innerText='HOST: '+(s.target||'---');
+  document.getElementById('resIp').innerText=s.ip||'---';
+  const[rl,rc]=riskMeta(rs);
+  document.getElementById('riskLabel').innerText=rl+' — Score: '+rs+'/100';
+  const rb=document.getElementById('riskBadge');rb.className='risk-badge '+rc;rb.innerHTML='<i class="fas fa-triangle-exclamation"></i> '+rl;rb.style.display='inline-flex';
+  ctr(document.getElementById('findingsCount'),(resp.findings||[]).length);
+  const pc=(s.web_port?(resp.modules?.recon?.ports||[]):(resp.recon?.ports||[])).length;
+  ctr(document.getElementById('portsCountVal'),pc);
+  document.getElementById('portsCount').innerText=pc+' Open Services';
+  document.getElementById('portsCount2').innerText=pc+' Assets';
+  document.getElementById('pg').scrollIntoView({behavior:'smooth',block:'start'});
+}
 document.getElementById('scanForm').onsubmit=async(e)=>{
   e.preventDefault();
   const t=document.getElementById('target').value.trim(),btn=document.getElementById('btn'),ldr=document.getElementById('loader');
   if(!t)return showError('No target specified.');
+  const mode=document.getElementById('scanMode').value;
   btn.disabled=true;ldr.classList.add('show');startLdr();
   document.getElementById('results').classList.remove('show');document.getElementById('results').style.display='none';
   document.getElementById('riskBadge').style.display='none';
+  _vsReset();
   const fd=new FormData();fd.append('target',t);
   try{
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minute timeout
 
-    const r=await fetch('?action=scan',{
+    const r=await fetch('?action='+mode,{
       method:'POST',
       body:fd,
       headers:{'X-VulnScope-Token':SCAN_TOKEN},
@@ -1871,7 +2555,7 @@ document.getElementById('scanForm').onsubmit=async(e)=>{
 
     if(!r.ok){const tx=await r.text();showError('Server error '+r.status+': '+tx.substring(0,150));return}
     const j=await r.json();
-    if(j.success){_last=j;renderDashboard(j)}else showError(j.message||'Unknown scan error.')
+    if(j.success){_last=j;if(mode==='scan'){renderDashboard(j)}else{renderDashboardShell(j);if(mode==='recon')renderRecon(j.recon);else if(mode==='fuzz')renderFuzz(j.fuzz);else if(mode==='payloads')renderPayloads(j.payload_scan);else if(j.modules){renderRecon(j.modules.recon);renderFuzz(j.modules.fuzz);renderPayloads(j.modules.payloads)}}}else showError(j.message||'Unknown scan error.')
   }catch(err){
     if (err.name === 'AbortError') {
       showError('Scan timed out. The target may have tarpits or too many open ports.');
