@@ -967,9 +967,11 @@ function vs_module1_recon(string $host, string $ip): array {
     if ($recon['dns']['A'] === [] && $host === $ip) { $recon['dns']['A'][] = $ip; }
     $recon['dns']['NS'] = array_values(array_unique($recon['nameservers']));
 
-    // ---- Port scan + banner grab (php_socket_scan engine, Nmap-XML output) ----
+    // ---- Port scan + banner grab: Nmap engine when the binary exists, PHP sockets otherwise ----
     try {
-        $scan_xml = @simplexml_load_string(php_socket_scan($host, $ip));
+        $raw_xml  = run_nmap($host);
+        $recon['scan_engine'] = (strpos($raw_xml, 'php-socket-fallback') !== false) ? 'PHP Socket' : 'Nmap';
+        $scan_xml = @simplexml_load_string($raw_xml);
         if ($scan_xml) {
             foreach ($scan_xml->host->ports->port as $p) {
                 $portId  = (string)$p['portid'];
@@ -991,9 +993,9 @@ function vs_module1_recon(string $host, string $ip): array {
         $recon['errors'][] = 'Port scan: ' . $e->getMessage();
     }
 
-    // ---- Native whois via IANA referral chain (raw socket) ----
+    // ---- Whois: raw socket (IANA referral chain) with RDAP-over-HTTPS fallback ----
     try {
-        $recon['whois'] = vs_native_whois($host);
+        $recon['whois'] = vs_whois_lookup($host);
     } catch (Throwable $e) {
         $recon['errors'][] = 'Whois: ' . $e->getMessage();
     }
@@ -1055,6 +1057,64 @@ function vs_native_whois(string $domain): ?array {
     $regRaw = $req($referral, $domain);
     $regData = $grab($regRaw);
     return array_merge($ianaData, $regData);
+}
+
+/** Whois with fallback: raw socket first, RDAP-over-HTTPS when port 43 is blocked. */
+function vs_whois_lookup(string $domain): ?array {
+    try {
+        return vs_native_whois($domain);
+    } catch (Throwable $e) {
+        $rdap = vs_rdap_whois($domain);
+        if ($rdap) { return $rdap; }
+        throw $e;
+    }
+}
+
+/** RDAP whois fallback over HTTPS (registration data via REST). */
+function vs_rdap_whois(string $domain): ?array {
+    $tld = strtolower(substr($domain, strrpos($domain, '.') + 1));
+    if (in_array($tld, ['bd', 'np', 'pk', 'lk', 'ir', 'sy', 'cu', 'kp'], true)) { return null; }
+    $ch = curl_init('https://rdap.org/domain/' . rawurlencode($domain));
+    curl_setopt_array($ch, [
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 12,
+        CURLOPT_CONNECTTIMEOUT => 5,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_USERAGENT      => 'VulnScope-Pro/5.0 (Security Research)',
+    ]);
+    $body = curl_exec($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    if ($code !== 200 || !is_string($body)) { return null; }
+    $j = json_decode($body, true);
+    if (!is_array($j)) { return null; }
+
+    $data = ['source' => 'RDAP (HTTPS fallback)'];
+    $data['domain_name'] = $j['ldhName'] ?? ($j['unicodeName'] ?? '');
+    foreach ($j['events'] ?? [] as $ev) {
+        $action = $ev['eventAction'] ?? '';
+        if ($action === 'registration')      { $data['creation_date'] = $ev['eventDate'] ?? ''; }
+        elseif ($action === 'last changed')  { $data['updated_date']  = $ev['eventDate'] ?? ''; }
+        elseif ($action === 'expiration')    { $data['expiry_date']   = $ev['eventDate'] ?? ''; }
+    }
+    foreach ($j['entities'] ?? [] as $e) {
+        if (in_array('registrar', $e['roles'] ?? [], true)) {
+            foreach ($e['vcardArray'][1] ?? [] as $item) {
+                if (($item[0] ?? '') === 'fn') { $data['registrar'] = $item[3] ?? ''; }
+            }
+            foreach ($e['publicIds'] ?? [] as $pid) {
+                if (($pid['type'] ?? '') === 'IANA Registrar ID') { $data['iana_id'] = $pid['identifier'] ?? ''; }
+            }
+            foreach ($e['links'] ?? [] as $l) {
+                if (!empty($l['href'])) { $data['registrar_url'] = $l['href']; }
+            }
+        }
+    }
+    foreach ($j['nameservers'] ?? [] as $ns) {
+        if (!empty($ns['ldhName'])) { $data['name_servers'][] = $ns['ldhName']; }
+    }
+    foreach ($j['status'] ?? [] as $st) { $data['status'][] = $st; }
+    return array_filter($data, fn($v) => $v !== '' && $v !== []);
 }
 
 /**
@@ -1124,9 +1184,31 @@ function vs_module2_fuzz(string $host, int $port, bool $tls, int $max_conc = 20)
     return ['base_url' => $base, 'paths_tested' => count($targets), 'hits' => $results];
 }
 
+/** Verdict logic shared by the injection tests. Returns [vulnerable, evidence]. */
+function vs_detect(string $type, int $code, string $body, string $headers): array {
+    switch ($type) {
+        case 'sqli':
+        case 'sqli2':
+            if (vs_sqli_error_in_body($body)) { return [true, vs_sqli_evidence($body)]; }
+            return [false, ''];
+        case 'xss':
+            if (strpos($body, '"><xsstester>') !== false) { return [true, 'Unencoded payload echoed in response body.']; }
+            return [false, ''];
+        case 'lfi':
+            if (preg_match('/root:[x*!]?:[0-9:]+:[0-9:]+:[^:]*:\/root:\/bin\/(ba)?sh/i', $body)) { return [true, 'passwd-file structure present in body.']; }
+            return [false, ''];
+        case 'redirect':
+            $loc = vs_extract_header($headers, 'Location');
+            if (in_array($code, [301, 302], true) && $loc && stripos($loc, 'google.com') !== false) { return [true, 'Redirects to ' . $loc]; }
+            return [false, ''];
+    }
+    return [false, ''];
+}
+
 /**
  * MODULE 3 — Active payload scanner (thread-safe injection tester).
- * SQLi / XSS / LFI / Open-Redirect validations against discovered GET inputs.
+ * SQLi / XSS / LFI / Open Redirect / CSRF / IDOR against discovered GET inputs,
+ * with synthetic parameter probing when the target exposes none.
  */
 function vs_module3_payloads(string $host, int $port, bool $tls, array $probe_paths = []): array {
     $scheme = $tls ? 'https' : 'http';
@@ -1175,57 +1257,117 @@ function vs_module3_payloads(string $host, int $port, bool $tls, array $probe_pa
     };
 
     $payloads = [
-        ['type' => 'sqli',     'payload' => "'"],
-        ['type' => 'sqli2',    'payload' => "' OR '1'='1"],
-        ['type' => 'xss',      'payload' => '"><xsstester>'],
-        ['type' => 'lfi',      'payload' => '../../../../etc/passwd'],
-        ['type' => 'redirect', 'payload' => 'https://google.com'],
+        'sqli'     => "'",
+        'sqli2'    => "' OR '1'='1",
+        'xss'      => '"><xsstester>',
+        'lfi'      => '../../../../etc/passwd',
+        'redirect' => 'https://google.com',
     ];
+
+    // Synthetic params probed when the page exposes no parameterised URLs.
+    $synth = [
+        'id'       => ['sqli', 'idor'],
+        'page'     => ['sqli', 'lfi'],
+        'q'        => ['sqli', 'xss'],
+        'search'   => ['sqli', 'xss'],
+        'file'     => ['lfi'],
+        'path'     => ['lfi'],
+        'url'      => ['redirect'],
+        'next'     => ['redirect'],
+        'redirect' => ['redirect'],
+        'cat'      => ['sqli'],
+        'user'     => ['sqli', 'idor'],
+    ];
+
     $deadline = microtime(true) + 60.0;
-    foreach (($probe_paths ?: ['/']) as $pp) {
-        $url0 = $base . '/' . ltrim($pp, '/');
+
+    /** Append/replace one query param on a candidate URL. */
+    $build = function (string $url, string $param, string $payload): string {
+        $u = parse_url($url);
+        $query = [];
+        if (!empty($u['query'])) { parse_str($u['query'], $query); }
+        $query[$param] = $payload;
+        $authority = ($u['host'] ?? '') . (isset($u['port']) ? ':' . $u['port'] : '');
+        return ($u['scheme'] ?? 'http') . '://' . $authority . ($u['path'] ?? '/') . '?' . http_build_query($query);
+    };
+
+    /** Record one test result with class metadata. */
+    $record = function (string $type, string $url, string $payload, bool $vuln, string $evidence, int $code) use (&$tests): void {
+        $meta = [
+            'sqli'     => ['SQL Injection',      'High',   'CWE-89'],
+            'sqli2'    => ['SQL Injection',      'High',   'CWE-89'],
+            'xss'      => ['Cross-Site Scripting', 'Medium', 'CWE-79'],
+            'lfi'      => ['Local File Inclusion', 'Critical', 'CWE-98'],
+            'redirect' => ['Open Redirect',      'Medium', 'CWE-601'],
+            'idor'     => ['IDOR',               'High',   'CWE-639'],
+            'csrf'     => ['CSRF',               'Medium', 'CWE-352'],
+        ][$type] ?? [$type, 'Medium', ''];
+        $tests[] = [
+            'type' => $type, 'label' => $meta[0],
+            'severity' => $meta[1], 'cwe' => $meta[2],
+            'url' => $url, 'payload' => $payload,
+            'vulnerable' => $vuln, 'evidence' => $evidence, 'status' => $code,
+        ];
+    };
+
+    $scanUrl = function (string $url0) use ($http, $collect, $payloads, $build, $record, $synth, $deadline): void {
         [$code0, $body0] = $http($url0);
-        if ($code0 !== 200 || !$body0) { continue; }
-        $cands = $collect($url0);          // extract param URLs
-        foreach ($cands as $cu) {
-            if (microtime(true) > $deadline) { break 2; }
-            foreach ($payloads as $t) {
-                $turl = vs_inject_param($cu, $t['payload']);
-                if ($turl === null) { continue; }
-                [$code, $body, $hdrs] = $http($turl);
-                $verdict = false;
-                $evidence = '';
-                switch ($t['type']) {
-                    case 'sqli':
-                    case 'sqli2':
-                        $verdict = vs_sqli_error_in_body($body);
-                        if ($verdict) { $evidence = vs_sqli_evidence($body); }
-                        break;
-                    case 'xss':
-                        $verdict = strpos($body, '"><xsstester>') !== false;
-                        if ($verdict) { $evidence = 'Unencoded payload echoed in response body.'; }
-                        break;
-                    case 'lfi':
-                        $verdict = (bool)preg_match('/root:[x*!]?:[0-9:]+:[0-9:]+:[^:]*:\/root:\/bin\/(ba)?sh/i', $body);
-                        if ($verdict) { $evidence = 'passwd-file structure present in body.'; }
-                        break;
-                    case 'redirect':
-                        $isRedir = in_array($code, [301, 302], true);
-                        $loc     = vs_extract_header($hdrs, 'Location');
-                        $verdict = $isRedir && $loc && stripos($loc, 'google.com') !== false;
-                        if ($verdict) { $evidence = 'Redirect to ' . $loc; }
-                        break;
+        if ($code0 !== 200 || !$body0) { return; }
+
+        // --- CSRF heuristic: sensitive forms with no token field ---
+        if (preg_match_all('/<form[^>]*>(.*?)<\/form>/is', $body0, $forms)) {
+            foreach ($forms[1] as $fi => $inner) {
+                $sensitive = (bool)preg_match('/type=["\'](?:password|email)["\']/i', $inner);
+                $hasToken  = (bool)preg_match('/name=["\'][^"\']*(token|csrf|authenticity|nonce)[^"\']*["\']/i', $inner);
+                if ($sensitive && !$hasToken) {
+                    $record('csrf', $url0, '(form analysis)', true, 'Sensitive form #' . ($fi + 1) . ' has no CSRF token field.', $code0);
                 }
-                $tests[] = [
-                    'url'      => $turl,
-                    'param'    => $t['type'] === 'redirect' ? 'redirect param' : $t['type'],
-                    'payload'  => $t['payload'],
-                    'vulnerable' => $verdict,
-                    'evidence' => $evidence,
-                    'status'   => $code,
-                ];
             }
         }
+
+        $cands = $collect($url0);
+        if (!$cands) {
+            // --- Synthetic param probing (common on static/landing pages) ---
+            foreach ($synth as $param => $types) {
+                if (microtime(true) > $deadline) { return; }
+                foreach ($types as $type) {
+                    $turl = $build($url0, $param, $payloads[$type]);
+                    [$code, $body, $hdrs] = $http($turl);
+                    [$vuln, $evidence] = vs_detect($type, $code, $body, $hdrs);
+                    $record($type, $turl, $payloads[$type], $vuln, $evidence, $code);
+                }
+            }
+            return;
+        }
+
+        foreach ($cands as $cu) {
+            if (microtime(true) > $deadline) { return; }
+            foreach ($payloads as $type => $payload) {
+                $turl = vs_inject_param($cu, $payload);
+                if ($turl === null) { continue; }
+                [$code, $body, $hdrs] = $http($turl);
+                [$vuln, $evidence] = vs_detect($type, $code, $body, $hdrs);
+                $record($type, $turl, $payload, $vuln, $evidence, $code);
+            }
+            // --- IDOR heuristic: sequential numeric ids return 200 without auth ---
+            if (preg_match('/[?&](id|user|uid|account|order)=(\d+)/i', $cu, $m)) {
+                $orig = (int)$m[2];
+                foreach ([1, $orig - 1, $orig + 1] as $try) {
+                    if ($try < 1 || $try === $orig) { continue; }
+                    $turl = $build($cu, strtolower($m[1]), (string)$try);
+                    [$code, $body] = $http($turl);
+                    if ($code === 200 && strlen($body) > 200) {
+                        $record('idor', $turl, (string)$try, true, "Sequential id={$try} returned HTTP 200 — verify object-level authorization.", $code);
+                        break;
+                    }
+                }
+            }
+        }
+    };
+
+    foreach (($probe_paths ?: ['/']) as $pp) {
+        if (microtime(true) > $deadline) { break; }
+        $scanUrl($base . '/' . ltrim($pp, '/'));
     }
     return ['base_url' => $base, 'tests_run' => count($tests), 'vulnerabilities' => $tests];
 }
@@ -1236,19 +1378,21 @@ function vs_module3_payloads(string $host, int $port, bool $tls, array $probe_pa
  */
 function vs_module4_export(array $module1, array $module2, array $module3, string $host, string $ip, int $risk): array {
     $findings = [];
+    $cvss_map = ['Critical' => 9.3, 'High' => 7.5, 'Medium' => 5.4, 'Low' => 3.1];
     foreach ($module3['vulnerabilities'] ?? [] as $v) {
         if (!($v['vulnerable'] ?? false)) { continue; }
+        $sev = $v['severity'] ?? 'High';
         $findings[] = [
-            'id'          => 'VSP-' . strtoupper(substr(md5($v['url'] . $v['payload']), 0, 8)),
-            'cvss'        => 0.0,
-            'severity'    => 'High',
-            'summary'     => "{$v['type']} injection confirmed: {$v['evidence']}",
+            'id'          => 'VSP-' . strtoupper(substr(md5(($v['url'] ?? '') . ($v['payload'] ?? '') . ($v['type'] ?? '')), 0, 8)),
+            'cvss'        => $cvss_map[$sev] ?? 7.5,
+            'severity'    => $sev,
+            'summary'     => trim(($v['label'] ?? ucfirst($v['type'] ?? 'Injection')) . ': ' . ($v['evidence'] ?? 'confirmed by active payload test')),
             'source'      => 'Module 3 Payload Scanner',
             'vector'      => '',
-            'cwe'         => '',
+            'cwe'         => $v['cwe'] ?? '',
             'published'   => '',
             'port'        => '',
-            'affected_service' => $v['url'],
+            'affected_service' => $v['url'] ?? '',
         ];
     }
     return [
@@ -2185,28 +2329,28 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
 .scan-mode:focus{border-color:var(--accent-border);box-shadow:0 0 0 2px var(--accent-glow)}
 .scan-mode option{background:#0a121e;color:var(--t1)}
 .vs-panel{display:none}.vs-panel.show{display:block;animation:cin .3s ease both}
-.vs-table{width:100%;border-collapse:collapse;font-size:11px}
-.vs-table th{font-family:var(--mono);font-size:8.5px;text-transform:uppercase;letter-spacing:.12em;color:var(--t4);text-align:left;padding:8px 14px;border-bottom:1px solid var(--border)}
-.vs-table td{padding:7px 14px;border-bottom:1px solid rgba(30,41,59,.4);font-family:var(--mono);font-size:10.5px;color:var(--t2);vertical-align:top}
+.vs-table{width:100%;border-collapse:collapse;font-size:12.5px}
+.vs-table th{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:#9fd8e8;text-align:left;padding:9px 14px;border-bottom:1px solid var(--border2)}
+.vs-table td{padding:8px 14px;border-bottom:1px solid rgba(30,41,59,.4);font-family:var(--mono);font-size:12px;color:var(--t1);vertical-align:top}
 .vs-table tr:last-child td{border-bottom:none}
-.vs-table tbody tr:hover td{background:rgba(6,182,212,.03)}
-.st-pill{font-size:9px;font-weight:700;font-family:var(--mono);padding:2px 7px;border-radius:4px;letter-spacing:.05em;white-space:nowrap}
-.st-200{color:#22c55e;background:rgba(34,197,94,.08);border:1px solid rgba(34,197,94,.2)}
-.st-3xx{color:#3b82f6;background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.2)}
-.st-403{color:var(--warn);background:var(--warn-dim);border:1px solid rgba(249,115,22,.25)}
-.st-404{color:var(--t4);background:rgba(100,116,139,.08);border:1px solid rgba(100,116,139,.2)}
-.st-err{color:var(--danger);background:var(--danger-dim);border:1px solid var(--danger-border)}
-.vuln-hit{padding:12px 14px;border:1px solid var(--danger-border);background:var(--danger-dim);border-radius:var(--r12);margin:10px 14px;animation:cin .25s ease both}
+.vs-table tbody tr:hover td{background:rgba(6,182,212,.05)}
+.st-pill{font-size:10px;font-weight:700;font-family:var(--mono);padding:2px 8px;border-radius:4px;letter-spacing:.04em;white-space:nowrap}
+.st-200{color:#4ade80;background:rgba(34,197,94,.12);border:1px solid rgba(34,197,94,.3)}
+.st-3xx{color:#60a5fa;background:rgba(59,130,246,.12);border:1px solid rgba(59,130,246,.3)}
+.st-403{color:#fb923c;background:rgba(249,115,22,.12);border:1px solid rgba(249,115,22,.35)}
+.st-404{color:#94a3b8;background:rgba(100,116,139,.12);border:1px solid rgba(100,116,139,.3)}
+.st-err{color:#f87171;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.35)}
+.vuln-hit{padding:14px 16px;border:1px solid var(--danger-border);background:var(--danger-dim);border-radius:var(--r12);margin:10px 14px;animation:cin .25s ease both}
 .vh-h{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px}
-.vh-type{font-size:10px;font-weight:800;font-family:var(--mono);color:var(--danger);text-transform:uppercase;letter-spacing:.1em}
-.vh-url{font-size:10px;font-family:var(--mono);color:var(--t2);word-break:break-all;margin-bottom:4px}
-.vh-ev{font-size:10px;font-family:var(--mono);color:var(--warn)}
-.recon-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;padding:14px 16px}
-.recon-cell{background:rgba(255,255,255,.02);border:1px solid var(--border);border-radius:var(--r12);padding:12px}
-.recon-cell h4{font-size:9px;font-weight:700;font-family:var(--mono);color:var(--accent);text-transform:uppercase;letter-spacing:.12em;margin-bottom:8px}
-.recon-cell .rc-v{font-family:var(--mono);font-size:10px;color:var(--t2);line-height:1.7;word-break:break-all}
-.rc-dim{color:var(--t4);font-size:9px}
-.whois-pre{max-height:280px;overflow:auto;padding:14px 16px;margin:0;font-family:var(--mono);font-size:10px;line-height:1.8;color:var(--t2);white-space:pre-wrap;word-break:break-word}
+.vh-type{font-size:12px;font-weight:800;font-family:var(--mono);color:#f87171;text-transform:uppercase;letter-spacing:.08em}
+.vh-url{font-size:11.5px;font-family:var(--mono);color:#c9d5e3;word-break:break-all;margin-bottom:5px}
+.vh-ev{font-size:11.5px;font-family:var(--mono);color:#fbbf24;line-height:1.6}
+.recon-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;padding:16px 18px}
+.recon-cell{background:rgba(255,255,255,.03);border:1px solid var(--border2);border-radius:var(--r12);padding:14px}
+.recon-cell h4{font-size:10.5px;font-weight:700;font-family:var(--mono);color:#67e8f9;text-transform:uppercase;letter-spacing:.1em;margin-bottom:9px}
+.recon-cell .rc-v{font-family:var(--mono);font-size:12.5px;color:var(--t1);line-height:1.8;word-break:break-word}
+.rc-dim{color:var(--t3);font-size:11px}
+.whois-pre{max-height:300px;overflow:auto;padding:16px 18px;margin:0;font-family:var(--mono);font-size:12px;line-height:1.8;color:#c9d5e3;white-space:pre-wrap;word-break:break-word}
 @media(max-width:768px){.recon-grid{grid-template-columns:1fr}.scan-mode{width:100%;height:36px}}
 </style>
 </head>
@@ -2480,6 +2624,8 @@ function _vsReset(){
   document.getElementById('payloadMeta').textContent='';
   document.getElementById('payloadHits').innerHTML='<div class="empty-s" style="padding:20px"><span>No injection validations ran.</span></div>';
   document.getElementById('reconGrid').innerHTML='';
+  _all=[];_filtered=[];
+  const vl=document.getElementById('vulnList');if(vl)vl.innerHTML='';
 }
 function toPanel(id){closeSB();const p=document.getElementById(id),r=document.getElementById('results');if(p&&r&&r.style.display!=='none'&&p.classList.contains('show')){setTimeout(()=>p.scrollIntoView({behavior:'smooth'}),260)}else{noScanYet()}}
 function _vsPill(code){const c=parseInt(code)||0;let cls='st-err';if(c>=200&&c<300)cls='st-200';else if(c>=300&&c<400)cls='st-3xx';else if(c===403)cls='st-403';else if(c===404)cls='st-404';return `<span class="st-pill ${cls}">${c||'ERR'}</span>`}
@@ -2509,7 +2655,8 @@ function renderFuzz(fz){
 }
 function renderPayloads(ps){
   const all=ps.vulnerabilities||[],hits=all.filter(v=>v.vulnerable);
-  document.getElementById('payloadHits').innerHTML=hits.length?hits.map(v=>`<div class="vuln-hit"><div class="vh-h"><span class="vh-type">${v.type}</span><span class="st-pill st-200">VULNERABLE</span></div><div class="vh-url">${v.url}</div><div class="vh-ev"><i class="fas fa-vial" style="margin-right:6px"></i>${v.evidence||'&mdash;'}</div></div>`).join(''):'<div class="empty-s" style="padding:20px"><span>No confirmed injection points (heuristic scan).</span></div>';
+  const LBL={sqli:'SQL Injection',sqli2:'SQL Injection',xss:'Cross-Site Scripting',lfi:'Local File Inclusion',redirect:'Open Redirect',idor:'IDOR',csrf:'CSRF'};
+  document.getElementById('payloadHits').innerHTML=hits.length?hits.map(v=>`<div class="vuln-hit"><div class="vh-h"><span class="vh-type">${LBL[v.type]||v.type}</span><span class="st-pill st-200">VULNERABLE</span><span class="st-pill st-403">${v.severity||''}</span><span class="st-pill st-404">${v.cwe||''}</span></div><div class="vh-url">${v.url}</div><div class="vh-ev"><i class="fas fa-vial" style="margin-right:6px"></i>${v.evidence||'&mdash;'}</div></div>`).join(''):'<div class="empty-s" style="padding:20px"><span>No confirmed injection points (heuristic scan).</span></div>';
   document.getElementById('payloadMeta').textContent=`${all.length} tests · ${hits.length} confirmed · ${ps.base_url||''}`;
   document.getElementById('payloadPanel').classList.add('show');
 }
@@ -2524,7 +2671,14 @@ function renderDashboardShell(resp){
   const[rl,rc]=riskMeta(rs);
   document.getElementById('riskLabel').innerText=rl+' — Score: '+rs+'/100';
   const rb=document.getElementById('riskBadge');rb.className='risk-badge '+rc;rb.innerHTML='<i class="fas fa-triangle-exclamation"></i> '+rl;rb.style.display='inline-flex';
-  ctr(document.getElementById('findingsCount'),(resp.findings||[]).length);
+  _all=(resp.findings||[]);_filtered=_all;_curSev='all';
+  document.querySelectorAll('.fb').forEach(b=>b.classList.remove('active'));
+  document.querySelector('.vf-wrap .fb')?.classList.add('active');
+  ctr(document.getElementById('findingsCount'),_all.length);
+  if(_all.length){document.getElementById('sifToolbar').style.display='flex';applyFilters()}else{document.getElementById('sifToolbar').style.display='none'}
+  const dist={critical:0,high:0,medium:0,low:0,info:0};
+  _all.forEach(v=>{const k=(v.severity||'info').toLowerCase();if(k in dist)dist[k]++});
+  renderSevBars(dist,_all.length);
   const pc=(s.web_port?(resp.modules?.recon?.ports||[]):(resp.recon?.ports||[])).length;
   ctr(document.getElementById('portsCountVal'),pc);
   document.getElementById('portsCount').innerText=pc+' Open Services';
@@ -2555,7 +2709,7 @@ document.getElementById('scanForm').onsubmit=async(e)=>{
 
     if(!r.ok){const tx=await r.text();showError('Server error '+r.status+': '+tx.substring(0,150));return}
     const j=await r.json();
-    if(j.success){_last=j;if(mode==='scan'){renderDashboard(j)}else{renderDashboardShell(j);if(mode==='recon')renderRecon(j.recon);else if(mode==='fuzz')renderFuzz(j.fuzz);else if(mode==='payloads')renderPayloads(j.payload_scan);else if(j.modules){renderRecon(j.modules.recon);renderFuzz(j.modules.fuzz);renderPayloads(j.modules.payloads)}}}else showError(j.message||'Unknown scan error.')
+      if(j.success){_last=j;if(mode==='scan'){renderDashboard(j)}else{renderDashboardShell(j);if(mode==='recon')renderRecon(j.recon);else if(mode==='fuzz')renderFuzz(j.fuzz);else if(mode==='payloads')renderPayloads(j.payload_scan);else if(j.modules){renderRecon(j.modules.recon);renderFuzz(j.modules.fuzz);renderPayloads(j.modules.payloads);applyFilters()}}}else showError(j.message||'Unknown scan error.')
   }catch(err){
     if (err.name === 'AbortError') {
       showError('Scan timed out. The target may have tarpits or too many open ports.');
