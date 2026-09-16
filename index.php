@@ -814,11 +814,17 @@ function run_nmap(string $target): string {
 
     if (!empty($bin) && @file_exists($bin)) {
         $safe = escapeshellarg($target);
-        $out = shell_exec("{$bin} -sV --version-intensity 5 -T4 --max-retries 1 --host-timeout 15m -oX - {$safe} 2>&1");
+        // -Pn is essential for real-world WAN hosts: without it, dropped pings make nmap
+        // mark the host 'down' and return zero results even when ports are wide open.
+        $out = shell_exec("{$bin} -Pn -sV --version-intensity 5 -T4 --max-retries 1 --open --host-timeout 15m -oX - {$safe} 2>&1");
         if ($out && strpos($out, '<nmaprun') !== false) return $out;
 
-        $out2 = shell_exec("{$bin} -sV --version-intensity 3 -T4 -oX - {$safe} 2>&1");
+        $out2 = shell_exec("{$bin} -Pn -sV --version-intensity 3 -T4 --open -oX - {$safe} 2>&1");
         if ($out2 && strpos($out2, '<nmaprun') !== false) return $out2;
+
+        // Last resort: version detection off entirely — many firewalls tarpit -sV probes.
+        $out3 = shell_exec("{$bin} -Pn -T4 --open -oX - {$safe} 2>&1");
+        if ($out3 && strpos($out3, '<nmaprun') !== false) return $out3;
     }
 
     $ip = filter_var($target, FILTER_VALIDATE_IP)
@@ -829,6 +835,48 @@ function run_nmap(string $target): string {
         throw new Exception("DNS resolution failed for: {$target}");
     }
     return php_socket_scan($target, $ip);
+}
+
+/* =========================================================
+   REAL-TARGET HTTP LAYER
+   Hardened request defaults for live web apps behind WAFs,
+   CDNs, TLS-terminating proxies and bot filters.
+   ========================================================= */
+
+/** Shared hardened curl defaults (browser-like UA, redirect tracking, TLS-lenient). */
+function vs_curl_defaults(): array {
+    return [
+        CURLOPT_USERAGENT      => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_MAXREDIRS      => 4,
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => 0,
+        CURLOPT_CONNECTTIMEOUT_MS => 6000,
+        CURLOPT_TIMEOUT_MS     => 12000,
+        CURLOPT_ENCODING       => '',
+        CURLOPT_SSL_OPTIONS    => CURLSSLOPT_NO_REVOKE,
+    ];
+}
+
+/** Baseline GET used to fingerprint soft-404s and seed the session. */
+function vs_http_baseline(string $base, array $extra = []): array {
+    $ch = curl_init($base);
+    curl_setopt_array($ch, vs_curl_defaults());
+    curl_setopt_array($ch, $extra);
+    $raw  = curl_exec($ch);
+    $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $url  = (string)curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+    $size = (int)curl_getinfo($ch, CURLINFO_SIZE_DOWNLOAD_T);
+    curl_close($ch);
+    return ['code' => $code, 'size' => $size, 'url' => $url, 'body' => is_string($raw) ? $raw : '', 'cookie' => ''];
+}
+
+/** Accept a user-supplied Cookie header value (authenticated scans). */
+function vs_sanitize_cookie(string $cookie): string {
+    $cookie = str_replace(["\r", "\n"], '', $cookie);
+    return (strlen($cookie) > 1200) ? substr($cookie, 0, 1200) : $cookie;
+}
 }
 
 
@@ -1121,8 +1169,33 @@ function vs_rdap_whois(string $domain): ?array {
  * MODULE 2 — Web directory / file bruteforcer (curl_multi, threaded equivalent).
  * Probes high-value paths: .env, .git, config.php, backup archives, /admin, etc.
  */
-function vs_module2_fuzz(string $host, int $port, bool $tls, int $max_conc = 20): array {
+function vs_module2_fuzz(string $host, int $port, bool $tls, int $max_conc = 20, string $cookie = ''): array {
     $base = ($tls ? 'https' : 'http') . "://{$host}:{$port}";
+    $cookie_hdr = vs_sanitize_cookie($cookie);
+
+    // Baseline: seed session cookie + fingerprint the site's soft-404 signature.
+    $bl   = vs_http_baseline($base, $cookie_hdr ? [CURLOPT_COOKIE => $cookie_hdr] : []);
+    $b404 = null;
+    if ($bl['code'] === 200) {
+        $probe = md5((string)time());
+        $ch = curl_init($base . '/' . $probe);
+        curl_setopt_array($ch, vs_curl_defaults());
+        curl_setopt($ch, CURLOPT_HEADER, true);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
+        if ($cookie_hdr) { curl_setopt($ch, CURLOPT_COOKIE, $cookie_hdr); }
+        $praw = curl_exec($ch);
+        $pcode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if ($pcode === 200 && is_string($praw)) {
+            $sep = strpos($praw, "\r\n\r\n");
+            $b404 = [strlen($praw) - ($sep !== false ? $sep + 4 : 0)];
+        }
+    }
+
+    // Passive path harvesting from robots.txt — real-app custom paths at zero cost.
+    $rbl = vs_http_baseline($base . '/robots.txt', $cookie_hdr
+        ? [CURLOPT_COOKIE => $cookie_hdr, CURLOPT_FOLLOWLOCATION => false]
+        : [CURLOPT_FOLLOWLOCATION => false]);
     $targets = [
         '.env', '.env.bak', '.git/HEAD', '.git/config', '.svn/entries', '.DS_Store',
         'config.php', 'configuration.php', 'wp-config.php', 'settings.py', 'database.yml',
@@ -1132,6 +1205,13 @@ function vs_module2_fuzz(string $host, int $port, bool $tls, int $max_conc = 20)
         'web.config', 'server-status', 'phpinfo.php', 'info.php', 'cgi-bin/',
         'uploads/', 'tmp/', 'backup/', 'old/', 'test/', 'api/', '.well-known/security.txt',
     ];
+    foreach (preg_split('/\r\n|\r|\n/', $rbl['body']) as $line) {
+        if (preg_match('~^(?:Dis)?allow:\s*/(\S+)~i', trim($line), $m)) {
+            $p = rtrim($m[1], '/');
+            if ($p !== '' && !in_array($p, $targets, true)) { $targets[] = $p; }
+        }
+    }
+    $targets = array_slice(array_unique($targets), 0, 90);
     $results  = [];
     $queue    = $targets;
     $deadline = microtime(true) + 25.0;   // hard ceiling for whole probe run
@@ -1143,15 +1223,13 @@ function vs_module2_fuzz(string $host, int $port, bool $tls, int $max_conc = 20)
         foreach ($batch as $path) {
             $url = $base . '/' . ltrim($path, '/');
             $ch = curl_init($url);
+            curl_setopt_array($ch, vs_curl_defaults());
             curl_setopt_array($ch, [
-                CURLOPT_RETURNTRANSFER => true,
                 CURLOPT_HEADER         => true,
                 CURLOPT_NOBODY         => false,
-                CURLOPT_TIMEOUT_MS     => 5000,
-                CURLOPT_CONNECTTIMEOUT_MS => 3000,
+                CURLOPT_TIMEOUT_MS     => 8000,
                 CURLOPT_FOLLOWLOCATION => false,
-                CURLOPT_SSL_VERIFYPEER => false,
-                CURLOPT_SSL_VERIFYHOST => 0,
+                CURLOPT_COOKIE         => $cookie_hdr,
             ]);
             curl_multi_add_handle($mh, $ch);
             $handles[$path] = $ch;
@@ -1172,8 +1250,11 @@ function vs_module2_fuzz(string $host, int $port, bool $tls, int $max_conc = 20)
             $hdr = is_string($resp) ? substr($resp, 0, 4096) : '';
             curl_multi_remove_handle($mh, $ch);
             curl_close($ch);
-            // Interesting = anything that is NOT the soft-404 signature (404 + empty body)
-            if ($code > 0 && !($code === 404 && $size === 0)) {
+            // Soft-404 filter: real 404s, or 200s byte-identical to the miss-page baseline.
+            $soft404 = ($code === 404 && $size === 0)
+                || ($code === 200 && $b404 !== null && $size === $b404[0]);
+            // Interesting = not a soft-404. 401/403 count: the resource EXISTS behind auth.
+            if ($code > 0 && !$soft404) {
                 $results[] = ['path' => '/' . ltrim($path, '/'), 'status' => $code, 'length' => $size, 'server_header' => vs_extract_header($hdr, 'Server')];
             }
         }
@@ -1181,7 +1262,7 @@ function vs_module2_fuzz(string $host, int $port, bool $tls, int $max_conc = 20)
     }
 
     usort($results, fn($a, $b) => ($a['status'] <=> $b['status']) ?: strcmp($a['path'], $b['path']));
-    return ['base_url' => $base, 'paths_tested' => count($targets), 'hits' => $results];
+    return ['base_url' => $base, 'paths_tested' => count($targets), 'hits' => $results, 'baseline_status' => $bl['code']];
 }
 
 /** Verdict logic shared by the injection tests. Returns [vulnerable, evidence]. */
@@ -1210,42 +1291,47 @@ function vs_detect(string $type, int $code, string $body, string $headers): arra
  * SQLi / XSS / LFI / Open Redirect / CSRF / IDOR against discovered GET inputs,
  * with synthetic parameter probing when the target exposes none.
  */
-function vs_module3_payloads(string $host, int $port, bool $tls, array $probe_paths = []): array {
+function vs_module3_payloads(string $host, int $port, bool $tls, array $probe_paths = [], string $cookie = ''): array {
     $scheme = $tls ? 'https' : 'http';
     $base   = "{$scheme}://{$host}:{$port}";
     $tests  = [];
+    $cookie_hdr = vs_sanitize_cookie($cookie);
+    $base_host  = strtolower(parse_url($base, PHP_URL_HOST) ?: $host);
 
-    /** Single lightweight GET, no redirect-follow, returns [status, body, headers]. */
-    $http = function (string $url) use ($base): array {
+    /** Hardened GET, no redirect-follow, returns [status, body, headers, final_url]. */
+    $http = function (string $url) use ($base, $cookie_hdr): array {
         $ch = curl_init($url);
+        curl_setopt_array($ch, vs_curl_defaults());
         curl_setopt_array($ch, [
-            CURLOPT_RETURNTRANSFER => true,
             CURLOPT_HEADER         => true,
             CURLOPT_FOLLOWLOCATION => false,
-            CURLOPT_TIMEOUT_MS     => 6000,
-            CURLOPT_CONNECTTIMEOUT_MS => 3000,
-            CURLOPT_SSL_VERIFYPEER => false,
-            CURLOPT_SSL_VERIFYHOST => 0,
-            CURLOPT_USERAGENT      => 'Mozilla/5.0 (VulnScope PayloadScanner)',
+            CURLOPT_TIMEOUT_MS     => 9000,
+            CURLOPT_COOKIE         => $cookie_hdr,
         ]);
         $raw = curl_exec($ch);
         $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $furl = (string)curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
         curl_close($ch);
-        if (!is_string($raw)) { return [$code, '', '']; }
+        if (!is_string($raw)) { return [$code, '', '', $furl]; }
         $sep = strpos($raw, "\r\n\r\n");
-        return [$code, $sep !== false ? substr($raw, $sep + 4) : $raw, substr($raw, 0, $sep ?: 0)];
+        return [$code, $sep !== false ? substr($raw, $sep + 4) : $raw, substr($raw, 0, $sep ?: 0), $furl];
     };
 
-    /** Grab candidate GET param URLs from a page's forms + query links. */
+    /** Baseline fetch for the fingerprint cache + session seeding. */
+    $bl0 = $http($base . '/');
+    $fp  = static fn(string $b): int => crc32($b);
+    $cache = [$fp($bl0[1])];
+
+    /** Grab candidate GET param URLs from a page's links + forms (same-host only). */
     $collect = function (string $url) use ($http): array {
         [$code, $body] = $http($url);
         $cands = [];
-        if ($code !== 200 || !$body) { return $cands; }
+        if ($code < 200 || $code >= 400 || !$body) { return $cands; }
         // query-string links
-        if (preg_match_all('/href=["\']([^"\']+\?[^"\']+["\'])/i', $body, $m)) {
+        if (preg_match_all('/href=["\']([^"\']+\?[^"\']+)["\']/i', $body, $m)) {
             foreach ($m[1] as $u) { $cands[] = html_entity_decode($u, ENT_QUOTES); }
         }
-        // form actions with GET params
+        // GET form actions (real input surface on live apps)
         if (preg_match_all('/<form[^>]+action=["\']([^"\']*)["\'][^>]*>/is', $body, $fm)) {
             foreach ($fm[1] as $act) { $cands[] = html_entity_decode($act, ENT_QUOTES); }
         }
@@ -1253,7 +1339,7 @@ function vs_module3_payloads(string $host, int $port, bool $tls, array $probe_pa
         if (preg_match_all('/[?&][a-zA-Z_][a-zA-Z0-9_]*=[^"\'\s>]+/', $body, $qm)) {
             $cands = array_merge($cands, $qm[0]);
         }
-        return array_slice(array_values(array_unique($cands)), 0, 6);
+        return array_slice(array_values(array_unique($cands)), 0, 8);
     };
 
     $payloads = [
@@ -1310,17 +1396,17 @@ function vs_module3_payloads(string $host, int $port, bool $tls, array $probe_pa
         ];
     };
 
-    $scanUrl = function (string $url0) use ($http, $collect, $payloads, $build, $record, $synth, $deadline): void {
+    $scanUrl = function (string $url0) use ($http, $collect, $payloads, $build, $record, $synth, $deadline, $cache, $fp, $cookie_hdr): void {
         [$code0, $body0] = $http($url0);
-        if ($code0 !== 200 || !$body0) { return; }
+        if ($code0 < 200 || $code0 >= 400 || !$body0) { return; }
 
-        // --- CSRF heuristic: sensitive forms with no token field ---
+        // --- CSRF heuristic: password/submit forms with no token field ---
         if (preg_match_all('/<form[^>]*>(.*?)<\/form>/is', $body0, $forms)) {
             foreach ($forms[1] as $fi => $inner) {
-                $sensitive = (bool)preg_match('/type=["\'](?:password|email)["\']/i', $inner);
-                $hasToken  = (bool)preg_match('/name=["\'][^"\']*(token|csrf|authenticity|nonce)[^"\']*["\']/i', $inner);
+                $sensitive = (bool)preg_match('/type=["\'](?:password|email|submit)["\']/i', $inner);
+                $hasToken  = (bool)preg_match('/name=["\'][^"\']*(token|csrf|authenticity|nonce|_token|xsrf)[^"\']*["\']/i', $inner);
                 if ($sensitive && !$hasToken) {
-                    $record('csrf', $url0, '(form analysis)', true, 'Sensitive form #' . ($fi + 1) . ' has no CSRF token field.', $code0);
+                    $record('csrf', $url0, '(form analysis)', true, 'Sensitive form #' . ($fi + 1) . ' has no CSRF token field — verify session-binding manually.', $code0);
                 }
             }
         }
@@ -1340,8 +1426,16 @@ function vs_module3_payloads(string $host, int $port, bool $tls, array $probe_pa
             return;
         }
 
-        foreach ($cands as $cu) {
+        foreach (array_slice($cands, 0, 6) as $cu) {
             if (microtime(true) > $deadline) { return; }
+            // Only same-host candidates (skip CDN/ads/social links).
+            $cu_host = strtolower((string)parse_url($cu, PHP_URL_HOST));
+            if ($cu_host !== '' && $cu_host !== $base_host) { continue; }
+            if ($cu_host === '' && $cu !== '' && $cu[0] !== '/' && $cu[0] !== '?') { continue; }
+            if (strpos($cu, '?') === false) {
+                if (strpos($cu, 'http') === 0 && strpos($cu, '?') === false) { continue; }
+                $cu .= (strpos($cu, '?') === false ? '?' : '&') . 'id=1';
+            }
             foreach ($payloads as $type => $payload) {
                 $turl = vs_inject_param($cu, $payload);
                 if ($turl === null) { continue; }
@@ -1349,15 +1443,19 @@ function vs_module3_payloads(string $host, int $port, bool $tls, array $probe_pa
                 [$vuln, $evidence] = vs_detect($type, $code, $body, $hdrs);
                 $record($type, $turl, $payload, $vuln, $evidence, $code);
             }
-            // --- IDOR heuristic: sequential numeric ids return 200 without auth ---
+            // --- IDOR heuristic: sequential numeric ids return distinct 200 pages ---
             if (preg_match('/[?&](id|user|uid|account|order)=(\d+)/i', $cu, $m)) {
                 $orig = (int)$m[2];
+                [$oc, $ob] = $http($cu);
+                $obFp = $fp($ob);
                 foreach ([1, $orig - 1, $orig + 1] as $try) {
                     if ($try < 1 || $try === $orig) { continue; }
                     $turl = $build($cu, strtolower($m[1]), (string)$try);
                     [$code, $body] = $http($turl);
-                    if ($code === 200 && strlen($body) > 200) {
-                        $record('idor', $turl, (string)$try, true, "Sequential id={$try} returned HTTP 200 — verify object-level authorization.", $code);
+                    $nf = $fp($body);
+                    if ($code === 200 && strlen($body) > 200 && !in_array($nf, $cache, true) && $nf !== $obFp) {
+                        $cache[] = $nf;
+                        $record('idor', $turl, (string)$try, true, "Sequential id={$try} returned distinct HTTP 200 page — verify object-level authorization.", $code);
                         break;
                     }
                 }
@@ -1369,7 +1467,7 @@ function vs_module3_payloads(string $host, int $port, bool $tls, array $probe_pa
         if (microtime(true) > $deadline) { break; }
         $scanUrl($base . '/' . ltrim($pp, '/'));
     }
-    return ['base_url' => $base, 'tests_run' => count($tests), 'vulnerabilities' => $tests];
+    return ['base_url' => $base, 'tests_run' => count($tests), 'vulnerabilities' => $tests, 'cookie_used' => $cookie_hdr !== ''];
 }
 
 /**
@@ -1884,7 +1982,8 @@ if (isset($_GET['action'])) {
             $port = (int)($_POST['port'] ?? 0);
             $tls  = $port === 443 || $port === 8443 || ($port === 0 && vs_tls_probe($host, 443));
             if ($port === 0) { $port = $tls ? 443 : 80; }
-            echo json_encode(['success' => true, 'fuzz' => vs_module2_fuzz($host, $port, $tls)], JSON_UNESCAPED_UNICODE);
+            $cookie = vs_sanitize_cookie(trim((string)($_POST['cookie'] ?? '')));
+            echo json_encode(['success' => true, 'fuzz' => vs_module2_fuzz($host, $port, $tls, 20, $cookie)], JSON_UNESCAPED_UNICODE);
         } catch (Throwable $e) {
             http_response_code(500);
             echo json_encode(['success' => false, 'message' => $e->getMessage()]);
@@ -1902,8 +2001,9 @@ if (isset($_GET['action'])) {
             $port = (int)($_POST['port'] ?? 0);
             $tls  = $port === 443 || $port === 8443 || ($port === 0 && vs_tls_probe($host, 443));
             if ($port === 0) { $port = $tls ? 443 : 80; }
-            $paths = array_filter(array_map('trim', explode("\n", (string)($_POST['paths'] ?? ''))));
-            echo json_encode(['success' => true, 'payload_scan' => vs_module3_payloads($host, $port, $tls, $paths)], JSON_UNESCAPED_UNICODE);
+            $paths  = array_filter(array_map('trim', explode("\n", (string)($_POST['paths'] ?? ''))));
+            $cookie = vs_sanitize_cookie(trim((string)($_POST['cookie'] ?? '')));
+            echo json_encode(['success' => true, 'payload_scan' => vs_module3_payloads($host, $port, $tls, $paths, $cookie)], JSON_UNESCAPED_UNICODE);
         } catch (Throwable $e) {
             http_response_code(500);
             echo json_encode(['success' => false, 'message' => $e->getMessage()]);
@@ -1919,6 +2019,7 @@ if (isset($_GET['action'])) {
             $validation  = validate_target($target_raw);
             if (!$validation) throw new Exception('Invalid or unreachable target.');
             $host = $validation['host']; $ip = $validation['ip'];
+            $cookie = vs_sanitize_cookie(trim((string)($_POST['cookie'] ?? '')));
 
             // ---- MODULE 1: recon ----
             $module1 = vs_module1_recon($host, $ip);
@@ -1938,7 +2039,7 @@ if (isset($_GET['action'])) {
             }
 
             // ---- MODULE 2: directory fuzz ----
-            $module2 = vs_module2_fuzz($host, $web_port, $tls);
+            $module2 = vs_module2_fuzz($host, $web_port, $tls, 20, $cookie);
 
             // probe the paths Module 2 found (200s first)
             $probe_paths = [];
@@ -1948,7 +2049,7 @@ if (isset($_GET['action'])) {
             $probe_paths = array_slice($probe_paths, 0, 5);
 
             // ---- MODULE 3: payload scan ----
-            $module3 = vs_module3_payloads($host, $web_port, $tls, $probe_paths);
+            $module3 = vs_module3_payloads($host, $web_port, $tls, $probe_paths, $cookie);
 
             // ---- MODULE 4: export envelope ----
             $response = vs_module4_export($module1, $module2, $module3, $host, $ip, 0);
@@ -1957,6 +2058,7 @@ if (isset($_GET['action'])) {
             $response['summary']['web_port'] = $web_port;
             $response['summary']['scan_engine'] = 'Modular Pipeline (no external binaries)';
             $response['summary']['duration_ms'] = (int)((microtime(true) - $t0) * 1000);
+            $response['summary']['cookie_used'] = $cookie !== '';
 
             /* ---- persist ---- */
             if ($db) {
@@ -2326,6 +2428,10 @@ body{background:var(--bg-root);color:var(--t1);font-family:var(--font);overflow-
    MODULAR PIPELINE UI (Modules 1-4)
    ============================================================ */
 .scan-mode{background:rgba(255,255,255,.03);border:1px solid var(--border2);border-radius:var(--r8);color:var(--t1);font-family:var(--mono);font-size:11px;padding:0 10px;height:38px;cursor:pointer;outline:none;transition:var(--ease)}
+.auth-row{margin-top:10px;display:flex;gap:10px;align-items:center}
+.auth-inp{flex:1;background:rgba(255,255,255,.03);border:1px solid var(--border2);border-radius:var(--r8);color:var(--t1);font-family:var(--mono);font-size:11.5px;padding:0 12px;height:34px;outline:none;transition:var(--ease)}
+.auth-inp:focus{border-color:var(--accent-border);box-shadow:0 0 0 2px var(--accent-glow)}
+.auth-lbl{font-family:var(--mono);font-size:10px;color:var(--t3);white-space:nowrap;display:flex;align-items:center;gap:6px}
 .scan-mode:focus{border-color:var(--accent-border);box-shadow:0 0 0 2px var(--accent-glow)}
 .scan-mode option{background:#0a121e;color:var(--t1)}
 .vs-panel{display:none}.vs-panel.show{display:block;animation:cin .3s ease both}
@@ -2438,6 +2544,10 @@ foreach ($_alist as $_ak => $_al):
             <option value="payloads">M3 &mdash; Payloads</option>
           </select>
           <button type="submit" id="btn"><i class="fas fa-shield-virus"></i>Launch Assessment</button>
+        </div>
+        <div class="auth-row">
+          <span class="auth-lbl"><i class="fas fa-key"></i>Session Cookie (optional)</span>
+          <input type="text" id="authCookie" class="auth-inp" placeholder="PHPSESSID=abc123; security=low   &mdash; for authenticated scans" autocomplete="off" spellcheck="false">
         </div>
       </form>
       <div id="loader">
@@ -2695,6 +2805,7 @@ document.getElementById('scanForm').onsubmit=async(e)=>{
   document.getElementById('riskBadge').style.display='none';
   _vsReset();
   const fd=new FormData();fd.append('target',t);
+  const ck=document.getElementById('authCookie').value.trim();if(ck)fd.append('cookie',ck);
   try{
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 300000); // 5 minute timeout
