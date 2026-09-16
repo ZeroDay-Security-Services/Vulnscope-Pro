@@ -29,6 +29,27 @@ error_reporting(E_ALL);
 ini_set('display_errors', 0);
 set_time_limit(300);
 
+/*
+ * Surface fatal errors as JSON instead of a blank 500 — fatals bypass
+ * try/catch, so without this a runtime crash (e.g. in an intel API parser)
+ * gives the frontend no diagnostic to work with.
+ */
+ini_set('display_errors', '0');
+ini_set('log_errors', '1');
+register_shutdown_function(function () {
+    $e = error_get_last();
+    if ($e && in_array($e['type'], [E_ERROR, E_PARSE, E_CORE_ERROR, E_COMPILE_ERROR], true)) {
+        if (!headers_sent()) {
+            http_response_code(500);
+            header('Content-Type: application/json');
+        }
+        echo json_encode([
+            'success' => false,
+            'message' => 'PHP fatal: ' . $e['message'] . ' in ' . basename($e['file']) . ' on line ' . $e['line'],
+        ]);
+    }
+});
+
 /* =========================================================
    DATABASE
    ========================================================= */
@@ -816,7 +837,7 @@ function run_nmap(string $target): string {
         $safe = escapeshellarg($target);
         // -Pn is essential for real-world WAN hosts: without it, dropped pings make nmap
         // mark the host 'down' and return zero results even when ports are wide open.
-        $out = shell_exec("{$bin} -Pn -sV --version-intensity 5 -T4 --max-retries 1 --open --host-timeout 15m -oX - {$safe} 2>&1");
+        $out = shell_exec("{$bin} -Pn -sV --version-intensity 5 -T4 --max-retries 1 --open --host-timeout 4m -oX - {$safe} 2>&1");
         if ($out && strpos($out, '<nmaprun') !== false) return $out;
 
         $out2 = shell_exec("{$bin} -Pn -sV --version-intensity 3 -T4 --open -oX - {$safe} 2>&1");
@@ -940,6 +961,9 @@ function vs_correlate_cves(array $module1_ports, string $ip): array {
             if (strlen(trim($kw)) >= 2) { $all_kw_map[$kw][] = ['port_id' => $port_id, 'service_label' => $service_label]; }
         }
     }
+
+    // Cap API fan-out: 8 keywords ≈ 16-24 upstream requests per scan.
+    $all_kw_map = array_slice($all_kw_map, 0, 8, true);
 
     if ($all_kw_map) {
         $requests = [];
@@ -2287,14 +2311,24 @@ if (isset($_GET['action'])) {
             $module3 = vs_module3_payloads($host, $web_port, $tls, $probe_paths, $cookie);
 
             // ---- CVE INTEL: correlate M1 ports against NVD/CIRCL/OpenCVE/Shodan/Censys ----
-            [$cve_findings, $enriched_ports] = vs_correlate_cves($module1['ports'], $ip);
+            // Fail-open: intel outages must never kill an otherwise successful scan.
+            $cve_findings = [];
+            $enriched_ports = [];
+            $intel_error = null;
+            try {
+                [$cve_findings, $enriched_ports] = vs_correlate_cves($module1['ports'], $ip);
+            } catch (Throwable $ie) {
+                $intel_error = $ie->getMessage();
+            }
 
             // ---- MODULE 4: export envelope (module findings + CVE intel merged) ----
             $response = vs_module4_export($module1, $module2, $module3, $host, $ip, 0);
             $byId = [];
             foreach ($response['findings'] as $f) { $byId[$f['id']] = true; }
             foreach ($cve_findings as $cf) {
-                if (!isset($byId[$cf['id']])) { $response['findings'][] = $cf; }
+                if (empty($cf['id']) || isset($byId[$cf['id']])) { continue; }
+                $byId[$cf['id']] = true;
+                $response['findings'][] = $cf;
             }
             $risk = calculate_risk_score($response['findings'], count($enriched_ports) ?: count($module1['ports']));
             $response['summary']['risk_score'] = $risk;
@@ -2304,6 +2338,7 @@ if (isset($_GET['action'])) {
             $response['summary']['scan_engine'] = 'Modular Pipeline + CVE Intel';
             $response['summary']['duration_ms'] = (int)((microtime(true) - $t0) * 1000);
             $response['summary']['cookie_used'] = $cookie !== '';
+            if ($intel_error !== null) { $response['summary']['intel_error'] = $intel_error; }
 
             /* ---- persist ---- */
             if ($db) {
