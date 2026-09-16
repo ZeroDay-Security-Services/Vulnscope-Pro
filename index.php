@@ -877,7 +877,6 @@ function vs_sanitize_cookie(string $cookie): string {
     $cookie = str_replace(["\r", "\n"], '', $cookie);
     return (strlen($cookie) > 1200) ? substr($cookie, 0, 1200) : $cookie;
 }
-}
 
 
 function validate_target(string $target): array|false {
