@@ -22,8 +22,8 @@ Select the scan mode in the UI dropdown, or call the API actions directly.
 | Module | Action | What it does |
 |--------|--------|--------------|
 | **M1 — Recon** | `?action=recon` | **Nmap-powered when the binary is present** (`-sV` service/version detection), automatic PHP-socket fallback otherwise. Native DNS (A / AAAA / MX / TXT / CNAME / NS), authoritative nameservers, TCP port scan + service/banner fingerprinting, raw-socket whois via the IANA → registrar referral chain with an RDAP-over-HTTPS fallback |
-| **M2 — Dir Fuzzer** | `?action=fuzz` | Parallel (`curl_multi`) brute-force of ~40 high-value paths (`.env`, `.git/HEAD`, `config.php`, `backup.zip`, `/admin`, …) with status codes, content-lengths, and Server headers; soft-404 filtered |
-| **M3 — Payloads** | `?action=payloads` | Thread-safe injection tester: SQLi (`'`, `' OR '1'='1` + DB error signatures), XSS (`"><xsstester>` unencoded reflection), LFI (`../../../../etc/passwd` structure regex), Open Redirect (`301/302` + external `Location`), **CSRF** (sensitive forms missing token fields) and **IDOR** (sequential-ID enumeration heuristic). When a page exposes no parameters, it synthetically probes common ones (`id`, `page`, `q`, `file`, `url`, …) |
+| **M2 — Dir Fuzzer** | `?action=fuzz` | Parallel (`curl_multi`) brute-force of ~40 high-value paths (`.env`, `.git/HEAD`, `config.php`, `backup.zip`, `/admin`, …) plus passive path harvesting from `robots.txt`. Browser-like User-Agent, baseline soft-404 fingerprinting, and full session-cookie passthrough; **401/403 responses are reported as hits** (the resource exists behind auth) |
+| **M3 — Payloads** | `?action=payloads` | Thread-safe injection tester: SQLi (`'`, `' OR '1'='1` + DB error signatures), XSS (`"><xsstester>` unencoded reflection), LFI (`../../../../etc/passwd` structure regex), Open Redirect (`301/302` + external `Location`), **CSRF** (sensitive forms missing token fields) and **IDOR** (sequential-ID enumeration with response-fingerprint baselining so generic 200 pages don't false-positive). When a page exposes no parameters, it synthetically probes common ones (`id`, `page`, `q`, `file`, `url`, …). Candidates are same-host filtered and duplicate-response filtered |
 | **M4 — Export** | `?action=full` / `?action=export` | Normalizes all module output into the report JSON consumed by the dashboard and downloadable via **Export JSON** |
 | **Full Pipeline** | `?action=full` | Runs M1 → M2 → M3 → M4 in one pass (auto-detects the web port) |
 
@@ -50,7 +50,13 @@ curl -X POST "http://localhost:8080/?action=full" \
      -d "target=scanme.example.lab"
 ```
 
-Optional POST fields: `port` (force a web port for M2/M3), `paths` (newline-separated probe paths for M3).
+Optional POST fields: `port` (force a web port for M2/M3), `paths` (newline-separated probe paths for M3), `cookie` (raw `Cookie` header value — enables **authenticated scanning** against apps behind logins, e.g. `PHPSESSID=…; security=low` for DVWA).
+
+### Scanning real-world targets
+
+The pipeline is hardened for live web applications: `-Pn`-based Nmap sweeps (WAN hosts ignore ping), browser-mimicking request headers (fewer WAF blocks), redirect tracking with a shared HTTP baseline, soft-404 discrimination, and duplicate-response suppression. Behind-CDN targets are handled by resolving the hostname directly. For best results against authenticated areas, paste a valid session cookie into the **Session Cookie** field in the UI.
+
+> Warning: `ALLOW_INTERNAL_SCAN` defaults to `true` for lab use — set it to `false` on any internet-facing deployment.
 
 ---
 
