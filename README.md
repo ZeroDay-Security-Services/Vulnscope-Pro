@@ -25,7 +25,7 @@ Select the scan mode in the UI dropdown, or call the API actions directly.
 | **M2 — Dir Fuzzer** | `?action=fuzz` | Parallel (`curl_multi`) brute-force of ~40 high-value paths (`.env`, `.git/HEAD`, `config.php`, `backup.zip`, `/admin`, …) plus passive path harvesting from `robots.txt`. Browser-like User-Agent, baseline soft-404 fingerprinting, and full session-cookie passthrough; **401/403 responses are reported as hits** (the resource exists behind auth) |
 | **M3 — Payloads** | `?action=payloads` | Thread-safe injection tester: SQLi (`'`, `' OR '1'='1` + DB error signatures), XSS (`"><xsstester>` unencoded reflection), LFI (`../../../../etc/passwd` structure regex), Open Redirect (`301/302` + external `Location`), **CSRF** (sensitive forms missing token fields) and **IDOR** (sequential-ID enumeration with response-fingerprint baselining so generic 200 pages don't false-positive). When a page exposes no parameters, it synthetically probes common ones (`id`, `page`, `q`, `file`, `url`, …). Candidates are same-host filtered and duplicate-response filtered |
 | **M4 — Export** | `?action=full` / `?action=export` | Normalizes all module output into the report JSON consumed by the dashboard and downloadable via **Export JSON** |
-| **Full Pipeline** | `?action=full` | Runs M1 → M2 → M3 → M4 in one pass (auto-detects the web port) |
+| **Full Pipeline** | `?action=full` | Runs M1 → M2 → M3 → M4 in one pass (auto-detects the web port) **and then correlates M1's open services against NVD, CIRCL, OpenCVE, Shodan and Censys** — so one scan returns both active-exploitation findings *and* real CVE intel (the legacy engine's result set is included) |
 
 All modules return a consistent JSON envelope:
 
@@ -38,7 +38,7 @@ All modules return a consistent JSON envelope:
 }
 ```
 
-`summary.scan_engine` reports whether port detection ran under **Nmap** or the **PHP Socket** fallback. Confirmed findings appear both in the module panels and in the main **Security Intelligence Findings** list with severity and CWE metadata (`CWE-89` SQLi, `CWE-79` XSS, `CWE-98` LFI, `CWE-601` Open Redirect, `CWE-352` CSRF, `CWE-639` IDOR).
+`summary.scan_engine` reports `"Modular Pipeline + CVE Intel"` on full scans. Confirmed findings appear both in the module panels and in the main **Security Intelligence Findings** list with severity and CWE metadata (`CWE-89` SQLi, `CWE-79` XSS, `CWE-98` LFI, `CWE-601` Open Redirect, `CWE-352` CSRF, `CWE-639` IDOR) plus all correlated CVEs.
 
 ### API Usage
 

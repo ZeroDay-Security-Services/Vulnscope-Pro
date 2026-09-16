@@ -872,7 +872,243 @@ function vs_http_baseline(string $base, array $extra = []): array {
     return ['code' => $code, 'size' => $size, 'url' => $url, 'body' => is_string($raw) ? $raw : '', 'cookie' => ''];
 }
 
-/** Accept a user-supplied Cookie header value (authenticated scans). */
+/**
+ * CVE correlation core (shared with the legacy engine): turns an open-port
+ * list into real CVE findings via NVD/CIRCL/OpenCVE keyword lookups + Shodan.
+ * Returns [findings (flat), open_ports (enriched with Shodan/Censys intel)].
+ */
+function vs_correlate_cves(array $module1_ports, string $ip): array {
+    $findings   = [];
+    $open_ports = [];
+    foreach ($module1_ports as $p) {
+        if (($p['state'] ?? '') !== 'open' && ($p['state'] ?? '') !== 'open|filtered') { continue; }
+        $open_ports[] = $p;
+    }
+    if (!$open_ports) { return [[], []]; }
+
+    $add_finding = function (array $hit, string $port_id, string $service_label) use (&$findings): void {
+        $hit['affected_service'] = $hit['affected_service'] ?? $service_label;
+        $hit['port']             = $hit['port'] ?? $port_id;
+        $id = $hit['id'];
+        if (!isset($findings[$id])) { $findings[$id] = $hit; return; }
+        $src = $hit['source'] ?? '';
+        if ($src && !str_contains($findings[$id]['source'] ?? '', $src)) { $findings[$id]['source'] .= ' / ' . $src; }
+        if (($findings[$id]['cvss'] ?? 0) == 0 && ($hit['cvss'] ?? 0) > 0) {
+            $findings[$id]['cvss']     = $hit['cvss'];
+            $findings[$id]['severity'] = $hit['severity'];
+        }
+    };
+
+    $all_kw_map = [];
+    foreach ($open_ports as $p) {
+        $port_id  = (string)($p['port'] ?? '');
+        $svc_name = (string)($p['service'] ?? '');
+        $product  = (string)($p['product'] ?? '');
+        $version  = (string)($p['version'] ?? '');
+        $port_int = (int)$port_id;
+
+        $inferred = [];
+        if (empty($product) || in_array(strtolower($svc_name), ['tcpwrapped', 'unknown', ''], true)) {
+            [$inf_svc, $inf_prod, $inf_kw] = port_to_products($port_int);
+            if ($inf_prod !== 'unknown') {
+                if (empty($product))  { $product  = $inf_prod; }
+                if (empty($svc_name)) { $svc_name = $inf_svc; }
+                $inferred = $inf_kw;
+            }
+        }
+
+        $keywords = [];
+        if ($product && !in_array(strtolower($product), ['tcpwrapped', 'unknown'], true)) {
+            $norm = normalize_product($product);
+            if ($norm) {
+                $keywords[] = $norm;
+                if ($version) { $keywords[] = $norm . ' ' . $version; }
+            }
+        }
+        foreach ($inferred as $kw) {
+            $normalized = normalize_product($kw);
+            if ($normalized) { $keywords[] = $normalized; }
+        }
+        if ($svc_name && !in_array(strtolower($svc_name), ['tcpwrapped', 'unknown', 'http', 'https', 'ssl'], true)) {
+            $keywords[] = $svc_name;
+        }
+        $keywords = array_unique(array_filter($keywords));
+        $service_label = trim("$product $version") ?: "Port $port_id";
+
+        $keywords = empty($inferred) ? array_slice($keywords, 0, 3) : array_slice($keywords, 0, 1);
+        foreach ($keywords as $kw) {
+            if (strlen(trim($kw)) >= 2) { $all_kw_map[$kw][] = ['port_id' => $port_id, 'service_label' => $service_label]; }
+        }
+    }
+
+    if ($all_kw_map) {
+        $requests = [];
+        $req_meta = [];
+        foreach (array_keys($all_kw_map) as $kw) {
+            $kw_enc = urlencode($kw);
+            if (NVD_API_KEY) {
+                $req_meta[] = ['source' => 'nvd', 'kw' => $kw];
+                $requests[] = ['url' => NVD_API_BASE . '?keywordSearch=' . $kw_enc . '&resultsPerPage=25', 'headers' => ['apiKey: ' . NVD_API_KEY], 'timeout' => 12];
+            }
+            $req_meta[] = ['source' => 'circl', 'kw' => $kw];
+            $requests[] = ['url' => CIRCL_API_BASE . 'search/' . $kw_enc, 'headers' => [], 'timeout' => 10];
+            if (OPENCVE_USER && OPENCVE_PASS) {
+                $req_meta[] = ['source' => 'opencve', 'kw' => $kw];
+                $requests[] = ['url' => OPENCVE_API_BASE . 'cves?search=' . $kw_enc . '&limit=20', 'headers' => ['Accept: application/json'], 'userpwd' => OPENCVE_USER . ':' . OPENCVE_PASS, 'timeout' => 12];
+            }
+        }
+
+        foreach (safe_curl_multi($requests) as $i => $data) {
+            if (!$data || !is_array($data)) { continue; }
+            $meta = $req_meta[$i];
+            $kw   = $meta['kw'];
+            $src  = $meta['source'];
+            $hits = [];
+            if ($src === 'nvd') {
+                foreach ($data['vulnerabilities'] ?? [] as $v) {
+                    $cve = $v['cve'] ?? [];
+                    $id  = $cve['id'] ?? '';
+                    if (!$id) { continue; }
+                    $score = 0; $vector = '';
+                    foreach (['cvssMetricV31', 'cvssMetricV30', 'cvssMetricV2'] as $mk) {
+                        if (!empty($cve['metrics'][$mk])) {
+                            $m = $cve['metrics'][$mk][0];
+                            $score  = $m['cvssData']['baseScore'] ?? 0;
+                            $vector = $m['cvssData']['vectorString'] ?? '';
+                            break;
+                        }
+                    }
+                    $desc = 'No description.';
+                    foreach ($cve['descriptions'] ?? [] as $d) {
+                        if ($d['lang'] === 'en') { $desc = $d['value']; break; }
+                    }
+                    $cwe = '';
+                    foreach ($cve['weaknesses'] ?? [] as $w) {
+                        $cwe = $w['description'][0]['value'] ?? ''; if ($cwe) { break; }
+                    }
+                    $hits[] = ['id' => $id, 'cvss' => (float)$score, 'severity' => classify_severity($score), 'summary' => $desc, 'source' => 'NVD', 'vector' => $vector, 'cwe' => $cwe, 'published' => substr($cve['published'] ?? '', 0, 10)];
+                }
+            } elseif ($src === 'circl') {
+                $items = isset($data[0]) ? $data : ($data['results'] ?? []);
+                foreach (array_slice($items, 0, 15) as $cve) {
+                    $id = $cve['id'] ?? ($cve['cve_id'] ?? '');
+                    if (!$id) { continue; }
+                    $score = (float)($cve['cvss'] ?? $cve['cvss_score'] ?? 0);
+                    $hits[] = ['id' => $id, 'cvss' => $score, 'severity' => classify_severity($score), 'summary' => $cve['summary'] ?? $cve['description'] ?? 'No summary.', 'source' => 'CIRCL', 'vector' => $cve['cvss-vector'] ?? '', 'cwe' => $cve['cwe'] ?? '', 'published' => substr($cve['Published'] ?? $cve['published'] ?? '', 0, 10)];
+                }
+            } elseif ($src === 'opencve') {
+                $items = $data['results'] ?? $data;
+                if (!is_array($items)) { continue; }
+                foreach (array_slice($items, 0, 20) as $item) {
+                    $id = $item['cve_id'] ?? $item['id'] ?? '';
+                    if (!$id) { continue; }
+                    $score = 0; $vector = '';
+                    foreach (['cvssV31', 'cvssV30', 'cvssV2'] as $mk) {
+                        if (!empty($item['metrics'][$mk]['data']['score'])) {
+                            $score  = (float)$item['metrics'][$mk]['data']['score'];
+                            $vector = $item['metrics'][$mk]['data']['vector'] ?? '';
+                            break;
+                        }
+                    }
+                    if (!$score && isset($item['cvss'])) { $score = (float)$item['cvss']; }
+                    $desc = '';
+                    if (!empty($item['description'])) {
+                        if (is_string($item['description'])) { $desc = $item['description']; }
+                        elseif (is_array($item['description'])) {
+                            foreach ($item['description'] as $d) {
+                                if (($d['lang'] ?? '') === 'en') { $desc = $d['value']; break; }
+                            }
+                            if (!$desc) { $desc = $item['description'][0]['value'] ?? ''; }
+                        }
+                    }
+                    $hits[] = ['id' => $id, 'cvss' => $score, 'severity' => classify_severity($score), 'summary' => $desc ?: 'No description.', 'source' => 'OpenCVE', 'vector' => $vector, 'cwe' => $item['cwe'] ?? '', 'published' => substr($item['created_at'] ?? $item['published'] ?? '', 0, 10)];
+                }
+            }
+
+            foreach ($hits as $hit) {
+                foreach ($all_kw_map[$kw] as $ctx) {
+                    $add_finding($hit, $ctx['port_id'], $ctx['service_label']);
+                }
+            }
+        }
+    }
+
+    // Shodan: internet-exposure CVEs + ports our scanner missed.
+    $shodan_data = query_shodan($ip);
+    foreach (($shodan_data['vulns'] ?? []) as $hit) {
+        if (!isset($findings[$hit['id']])) {
+            $hit['port']             = $hit['port'] ?? 'External';
+            $hit['affected_service'] = $hit['affected_service'] ?? 'Internet-facing exposure (Shodan)';
+            $findings[$hit['id']]    = $hit;
+        } else {
+            if (!str_contains($findings[$hit['id']]['source'], 'Shodan')) { $findings[$hit['id']]['source'] .= ' / Shodan'; }
+            if (($findings[$hit['id']]['cvss'] ?? 0) == 0 && ($hit['cvss'] ?? 0) > 0) {
+                $findings[$hit['id']]['cvss']     = $hit['cvss'];
+                $findings[$hit['id']]['severity'] = $hit['severity'];
+            }
+        }
+    }
+    $existing_ports = array_column($open_ports, 'port');
+    foreach (($shodan_data['ports'] ?? []) as $sp) {
+        if (!in_array($sp, $existing_ports)) {
+            $open_ports[] = ['port' => $sp, 'service' => 'unknown', 'product' => 'Observed by Shodan', 'version' => ''];
+        }
+    }
+
+    // Censys: service enrichment + product CVE lookups.
+    $censys_data = query_censys($ip);
+    if ($censys_data && !isset($censys_data['error'])) {
+        foreach (extract_censys_services($censys_data) as $csvc) {
+            $port_id = $csvc['port'];
+            $product = $csvc['product'];
+            $version = $csvc['version'];
+
+            $found = false;
+            foreach ($open_ports as &$op) {
+                if ($op['port'] == $port_id) {
+                    if (empty($op['product']) && $product) { $op['product'] = $product; }
+                    if (empty($op['version']) && $version) { $op['version'] = $version; }
+                    $found = true; break;
+                }
+            }
+            unset($op);
+            if (!$found && $port_id) {
+                $open_ports[] = ['port' => $port_id, 'service' => $csvc['service'], 'product' => $product, 'version' => $version];
+            }
+
+            if ($product) {
+                $norm = normalize_product($product);
+                foreach (query_nvd($norm . ' ' . $version, 20) as $hit) {
+                    $hit['affected_service'] = "$product $version";
+                    $hit['port']             = $port_id;
+                    if (!isset($findings[$hit['id']])) { $findings[$hit['id']] = $hit; }
+                }
+                foreach (query_circl($norm, 10) as $hit) {
+                    $hit['affected_service'] = "$product $version";
+                    $hit['port']             = $port_id;
+                    if (!isset($findings[$hit['id']])) { $findings[$hit['id']] = $hit; }
+                }
+            }
+        }
+    }
+
+    $findings = array_values($findings);
+    enrich_findings_intel($findings);
+
+    usort($findings, function ($a, $b) {
+        $order = ['Critical' => 5, 'High' => 4, 'Medium' => 3, 'Low' => 2, 'Info' => 1, 'Unknown' => 0];
+        $sa = $order[$a['severity']] ?? 0;
+        $sb = $order[$b['severity']] ?? 0;
+        if ($sa !== $sb) { return $sb - $sa; }
+        return $b['cvss'] <=> $a['cvss'];
+    });
+
+    return [$findings, $open_ports];
+}
+
+/**
+ * Accept a user-supplied Cookie header value (authenticated scans).
+ */
 function vs_sanitize_cookie(string $cookie): string {
     $cookie = str_replace(["\r", "\n"], '', $cookie);
     return (strlen($cookie) > 1200) ? substr($cookie, 0, 1200) : $cookie;
@@ -2050,12 +2286,22 @@ if (isset($_GET['action'])) {
             // ---- MODULE 3: payload scan ----
             $module3 = vs_module3_payloads($host, $web_port, $tls, $probe_paths, $cookie);
 
-            // ---- MODULE 4: export envelope ----
+            // ---- CVE INTEL: correlate M1 ports against NVD/CIRCL/OpenCVE/Shodan/Censys ----
+            [$cve_findings, $enriched_ports] = vs_correlate_cves($module1['ports'], $ip);
+
+            // ---- MODULE 4: export envelope (module findings + CVE intel merged) ----
             $response = vs_module4_export($module1, $module2, $module3, $host, $ip, 0);
-            $risk = calculate_risk_score($response['findings'], count($module1['ports']));
+            $byId = [];
+            foreach ($response['findings'] as $f) { $byId[$f['id']] = true; }
+            foreach ($cve_findings as $cf) {
+                if (!isset($byId[$cf['id']])) { $response['findings'][] = $cf; }
+            }
+            $risk = calculate_risk_score($response['findings'], count($enriched_ports) ?: count($module1['ports']));
             $response['summary']['risk_score'] = $risk;
             $response['summary']['web_port'] = $web_port;
-            $response['summary']['scan_engine'] = 'Modular Pipeline (no external binaries)';
+            $response['summary']['total_findings'] = count($response['findings']);
+            $response['summary']['open_ports_count'] = count($enriched_ports) ?: count($module1['ports']);
+            $response['summary']['scan_engine'] = 'Modular Pipeline + CVE Intel';
             $response['summary']['duration_ms'] = (int)((microtime(true) - $t0) * 1000);
             $response['summary']['cookie_used'] = $cookie !== '';
 
