@@ -12,3 +12,14 @@ Thumbs.db
 
 # Tooling workspace
 .freebuff/
+.cloud-attachments/
+php-docker-tmp/
+
+# Local scan artifacts (SARIF/JSON exports, temp fixtures)
+.tmp-*
+*.sarif.json
+
+# Upstream reference checkouts kept locally for integration work only
+Vulnscope-Pro-main/
+vulnerability-lookup-main/
+zaproxy-main/
